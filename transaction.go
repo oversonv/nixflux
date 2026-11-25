@@ -533,12 +533,13 @@ func reconcileCommandLinks(paths AppPaths, db Database, settings Settings) error
 
 func packageLinkMap(paths AppPaths, db Database, settings Settings) (map[string]string, error) {
 	result := map[string]string{}
+	packages := packagesForProfile(db, settings.ProfileName)
 	for _, spec := range settings.Enabled {
 		name, version, err := parsePackageVersion(spec)
 		if err != nil {
 			return nil, appError("invalid_config", "enabled entry must be name==version: "+spec)
 		}
-		pkg, installed := db.Packages[normalizePackageName(name)]
+		pkg, installed := packages[normalizePackageName(name)]
 		if !installed || !versionsEqual(pkg.Version, version) {
 			continue
 		}

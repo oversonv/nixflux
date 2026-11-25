@@ -161,6 +161,15 @@ func removeProfile(paths AppPaths, name string) error {
 			return appError("io_error", err.Error())
 		}
 	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		return err
+	}
+	delete(db.ProfileClosures, filename)
+	delete(db.ProfileFrozen, filename)
+	if err := saveDatabase(paths.Database, db); err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil {
 		return appError("io_error", err.Error())
 	}

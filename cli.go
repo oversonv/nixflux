@@ -171,8 +171,12 @@ func runCLI(argv []string) int {
 		if loadErr != nil {
 			return reportError(loadErr)
 		}
+		defaultProfile, profileErr := loadDefaultSettings(paths)
+		if profileErr != nil {
+			return reportError(profileErr)
+		}
 		installedVersion := versionFromSpec(arg)
-		if installed, exists := after.Packages[normalizePackageName(packageName)]; exists {
+		if installed, exists := packagesForProfile(after, defaultProfile.ProfileName)[normalizePackageName(packageName)]; exists {
 			installedVersion = installed.Version
 		}
 		renderInstallSuccess(packageName, installedVersion, started, countChangedDependencies(before, after, packageName))
@@ -186,11 +190,16 @@ func runCLI(argv []string) int {
 		}
 		renderRemoveSuccess(name, version, started)
 	case "env list":
+		defaultProfile, err := loadDefaultSettings(paths)
+		if err != nil {
+			return reportError(err)
+		}
 		db, err := loadDatabase(paths.Database)
 		if err != nil {
 			return reportError(err)
 		}
-		for _, line := range listInstalled(db) {
+		ensureProfileClosure(paths, &db, defaultProfile)
+		for _, line := range listInstalled(databaseForProfile(db, defaultProfile)) {
 			fmt.Println(line)
 		}
 	case "env freeze", "env unfreeze":
@@ -205,11 +214,16 @@ func runCLI(argv []string) int {
 		}
 		renderSimpleSuccess(verb, name, version)
 	case "env frozen":
+		defaultProfile, err := loadDefaultSettings(paths)
+		if err != nil {
+			return reportError(err)
+		}
 		db, err := loadDatabase(paths.Database)
 		if err != nil {
 			return reportError(err)
 		}
-		lines := frozenPackages(db)
+		ensureProfileClosure(paths, &db, defaultProfile)
+		lines := frozenPackages(databaseForProfile(db, defaultProfile))
 		if len(lines) == 0 {
 			fmt.Println("No frozen packages.")
 			break
@@ -297,15 +311,19 @@ func RunCLI(argv []string) int {
 
 func countChangedDependencies(before, after Database, rootName string) int {
 	rootKey := normalizePackageName(rootName)
+	previousArtifacts := map[string]bool{}
+	for artifactID := range before.Artifacts {
+		previousArtifacts[artifactID] = true
+	}
+	for _, pkg := range before.Packages {
+		previousArtifacts[pkg.Dir] = true
+	}
 	count := 0
-	for key, installed := range after.Packages {
-		if key == rootKey {
+	for artifactID, installed := range after.Artifacts {
+		if normalizePackageName(installed.Name) == rootKey || previousArtifacts[artifactID] {
 			continue
 		}
-		previous, existed := before.Packages[key]
-		if !existed || !versionsEqual(previous.Version, installed.Version) {
-			count++
-		}
+		count++
 	}
 	return count
 }

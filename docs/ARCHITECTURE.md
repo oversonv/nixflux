@@ -20,14 +20,15 @@ Tests remain alongside the root package so they can exercise internal transactio
 
 ## State ownership
 
-`channels.json` is the sole repository configuration source. Each profile TOML owns an independent `enabled` package target list; `profiles.lock` selects the persistent default and `.current` selects the loaded working environment. `store.json` records what is physically installed in the private store. These are different concepts:
+`channels.json` is the sole repository configuration source. Each profile TOML owns an independent `enabled` package target list; `profiles.lock` selects the persistent default and `.current` selects the loaded working environment. `store.json` indexes immutable-by-convention artifacts and records a resolved artifact closure per profile. The shared Store contains bytes; profile closures define package ownership and availability. These are different concepts:
 
 - the loaded profile's `enabled` list determines which root package entrypoints may be exposed in `PATH`.
-- the database records both enabled root packages and transitive dependencies installed to satisfy them.
-- dependency packages remain installed and tracked, but their commands are not published unless they are explicit targets in the loaded profile.
+- the profile closure pins each root and transitive dependency to an artifact ID derived from its Store path.
+- the artifact index is shared for deduplication, but resolution only reuses packages in the selected profile closure or read-only system packages.
+- dependency commands are not published unless the dependency is also an explicit root target in the loaded profile.
 - `profiles update [name]` reconciles only the selected profile's enabled targets with repositories and the Store. Without a name it uses `profiles.lock`; with a name it also loads that profile without changing the persistent default.
 
-Package mutations update the target profile, database, store directories, active-profile marker, and command links through one transaction journal. Startup link reconciliation removes stale NixFlux-owned command links created by older releases, without deleting unrelated commands. On Android, current links live in `$PREFIX/bin`; `$HOME/nix/bin` is retained only as a legacy migration source. The CLI refuses to run on Android when `PREFIX` is missing or not absolute, preventing silent publication into a directory outside Termux's standard `PATH`.
+Package mutations update the target profile, artifact index, profile closure, active-profile marker, and command links through one transaction journal. Removing a root only changes its profile closure; Store objects remain available to other profiles. Garbage collection and historical profile generations are not implemented yet. Startup link reconciliation removes stale NixFlux-owned command links created by older releases, without deleting unrelated commands. On Android, current links live in `$PREFIX/bin`; `$HOME/nix/bin` is retained only as a legacy migration source. The CLI refuses to run on Android when `PREFIX` is missing or not absolute, preventing silent publication into a directory outside Termux's standard `PATH`.
 
 ## Dependency direction
 

@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const databaseSchemaVersion = 3
+const databaseSchemaVersion = 4
 
 type InstalledPackage struct {
 	Name          string            `json:"name"`
@@ -29,13 +29,20 @@ type InstalledPackage struct {
 }
 
 type Database struct {
-	SchemaVersion  int                         `json:"schema_version"`
-	Packages       map[string]InstalledPackage `json:"packages"`
-	LegacyPackages map[string]InstalledPackage `json:"legacy_packages,omitempty"`
+	SchemaVersion   int                                    `json:"schema_version"`
+	Packages        map[string]InstalledPackage            `json:"packages"`
+	LegacyPackages  map[string]InstalledPackage            `json:"legacy_packages,omitempty"`
+	Artifacts       map[string]InstalledPackage            `json:"artifacts,omitempty"`
+	ProfileClosures map[string]map[string]string           `json:"profile_closures,omitempty"`
+	ProfileFrozen   map[string]map[string]string           `json:"profile_frozen,omitempty"`
 }
 
 func emptyDatabase() Database {
-	return Database{SchemaVersion: databaseSchemaVersion, Packages: map[string]InstalledPackage{}, LegacyPackages: map[string]InstalledPackage{}}
+	return Database{
+		SchemaVersion: databaseSchemaVersion, Packages: map[string]InstalledPackage{},
+		LegacyPackages: map[string]InstalledPackage{}, Artifacts: map[string]InstalledPackage{},
+		ProfileClosures: map[string]map[string]string{}, ProfileFrozen: map[string]map[string]string{},
+	}
 }
 
 func loadDatabase(path string) (Database, error) {
@@ -47,7 +54,7 @@ func loadDatabase(path string) (Database, error) {
 		return Database{}, appError("io_error", err.Error())
 	}
 	var db Database
-	if err := json.Unmarshal(raw, &db); err == nil && db.Packages != nil {
+	if err := json.Unmarshal(raw, &db); err == nil && (db.Packages != nil || db.Artifacts != nil || db.ProfileClosures != nil) {
 		if db.SchemaVersion > databaseSchemaVersion {
 			return Database{}, appError("invalid_database", fmt.Sprintf("database schema %d is newer than supported schema %d", db.SchemaVersion, databaseSchemaVersion))
 		}
@@ -56,6 +63,23 @@ func loadDatabase(path string) (Database, error) {
 		}
 		if db.LegacyPackages == nil {
 			db.LegacyPackages = map[string]InstalledPackage{}
+		}
+		if db.Packages == nil {
+			db.Packages = map[string]InstalledPackage{}
+		}
+		if db.Artifacts == nil {
+			db.Artifacts = map[string]InstalledPackage{}
+		}
+		if db.ProfileClosures == nil {
+			db.ProfileClosures = map[string]map[string]string{}
+		}
+		if db.ProfileFrozen == nil {
+			db.ProfileFrozen = map[string]map[string]string{}
+		}
+		for _, pkg := range db.Packages {
+			if pkg.Dir != "" {
+				db.Artifacts[pkg.Dir] = pkg
+			}
 		}
 		storePath := filepath.Join(filepath.Dir(filepath.Dir(path)), "store")
 		if err := validateDatabase(db, storePath); err != nil {
@@ -112,6 +136,20 @@ func saveDatabase(path string, db Database) error {
 	if db.LegacyPackages == nil {
 		db.LegacyPackages = map[string]InstalledPackage{}
 	}
+	if db.Artifacts == nil {
+		db.Artifacts = map[string]InstalledPackage{}
+	}
+	if db.ProfileClosures == nil {
+		db.ProfileClosures = map[string]map[string]string{}
+	}
+	if db.ProfileFrozen == nil {
+		db.ProfileFrozen = map[string]map[string]string{}
+	}
+	for _, pkg := range db.Packages {
+		if pkg.Dir != "" {
+			db.Artifacts[pkg.Dir] = pkg
+		}
+	}
 	if err := atomicWriteJSON(path, db); err != nil {
 		return appError("io_error", err.Error())
 	}
@@ -119,6 +157,172 @@ func saveDatabase(path string, db Database) error {
 }
 
 func databasePackageKey(name string) string { return normalizePackageName(name) }
+
+func cloneDatabase(db Database) Database {
+	clone := Database{
+		SchemaVersion: databaseSchemaVersion,
+		Packages: map[string]InstalledPackage{}, LegacyPackages: map[string]InstalledPackage{},
+		Artifacts: map[string]InstalledPackage{}, ProfileClosures: map[string]map[string]string{},
+		ProfileFrozen: map[string]map[string]string{},
+	}
+	for key, pkg := range db.Packages {
+		clone.Packages[key] = pkg
+	}
+	for key, pkg := range db.LegacyPackages {
+		clone.LegacyPackages[key] = pkg
+	}
+	for key, pkg := range db.Artifacts {
+		clone.Artifacts[key] = pkg
+	}
+	for profile, closure := range db.ProfileClosures {
+		clone.ProfileClosures[profile] = map[string]string{}
+		for name, artifactID := range closure {
+			clone.ProfileClosures[profile][name] = artifactID
+		}
+	}
+	for profile, frozen := range db.ProfileFrozen {
+		clone.ProfileFrozen[profile] = map[string]string{}
+		for name, value := range frozen {
+			clone.ProfileFrozen[profile][name] = value
+		}
+	}
+	return clone
+}
+
+func databaseForProfile(db Database, settings Settings) Database {
+	return Database{
+		Packages: packagesForProfile(db, settings.ProfileName),
+	LegacyPackages: map[string]InstalledPackage{}, Artifacts: db.Artifacts,
+	}
+}
+
+func packagesForProfile(db Database, profile string) map[string]InstalledPackage {
+	packages := map[string]InstalledPackage{}
+	closure, hasClosure := db.ProfileClosures[profile]
+	if profile == "" || !hasClosure {
+		for key, pkg := range db.Packages {
+			packages[key] = pkg
+		}
+		return packages
+	}
+	for name, artifactID := range closure {
+		pkg, exists := db.Artifacts[artifactID]
+		if !exists || normalizePackageName(pkg.Name) != normalizePackageName(name) {
+			continue
+		}
+		pkg.Frozen = versionsEqual(db.ProfileFrozen[profile][normalizePackageName(name)], pkg.Version)
+		packages[normalizePackageName(name)] = pkg
+	}
+	return packages
+}
+
+func ensureProfileClosure(paths AppPaths, db *Database, settings Settings) {
+	if db == nil || settings.ProfileName == "" {
+		return
+	}
+	if _, exists := db.ProfileClosures[settings.ProfileName]; exists {
+		return
+	}
+	closure := map[string]string{}
+	if db.ProfileFrozen[settings.ProfileName] == nil {
+		db.ProfileFrozen[settings.ProfileName] = map[string]string{}
+	}
+	visiting := map[string]bool{}
+	var addPackage func(InstalledPackage)
+	addPackage = func(pkg InstalledPackage) {
+		key := normalizePackageName(pkg.Name)
+		if key == "" || visiting[key] || verifyStoredPackage(paths, pkg) != nil {
+			return
+		}
+		visiting[key] = true
+		artifactID := pkg.Dir
+		closure[key] = artifactID
+		db.Artifacts[artifactID] = pkg
+		if pkg.Frozen {
+			db.ProfileFrozen[settings.ProfileName][key] = pkg.Version
+		}
+		for _, dependency := range pkg.Dependencies {
+			alternatives, err := parseDependencyGroup(dependency)
+			if err != nil {
+				continue
+			}
+			for _, alternative := range alternatives {
+				name, constraint := alternative[0], alternative[1]
+				if version, ok := systemPackageVersion(name); ok {
+					if satisfied, _ := versionSatisfies(version, constraint); satisfied {
+						break
+					}
+				}
+				for _, candidate := range legacyPackageCandidates(*db, name) {
+					if satisfied, _ := versionSatisfies(candidate.Version, constraint); satisfied && verifyStoredPackage(paths, candidate) == nil {
+						addPackage(candidate)
+						if _, added := closure[normalizePackageName(candidate.Name)]; added {
+							break
+						}
+					}
+				}
+				if _, added := closure[normalizePackageName(name)]; added {
+					break
+				}
+			}
+		}
+		delete(visiting, key)
+	}
+	for _, spec := range settings.Enabled {
+		name, version, err := parsePackageVersion(spec)
+		if err != nil {
+			continue
+		}
+		for _, candidate := range legacyPackageCandidates(*db, name) {
+			if versionsEqual(candidate.Version, version) {
+				addPackage(candidate)
+				break
+			}
+		}
+	}
+	db.ProfileClosures[settings.ProfileName] = closure
+}
+
+func legacyPackageCandidates(db Database, name string) []InstalledPackage {
+	key := normalizePackageName(name)
+	candidates := []InstalledPackage{}
+	if pkg, exists := db.Packages[key]; exists {
+		candidates = append(candidates, pkg)
+	}
+	for _, pkg := range db.LegacyPackages {
+		if normalizePackageName(pkg.Name) == key {
+			candidates = append(candidates, pkg)
+		}
+	}
+	for _, pkg := range db.Artifacts {
+		if normalizePackageName(pkg.Name) == key {
+			candidates = append(candidates, pkg)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if cmp, err := compareVersions(candidates[i].Version, candidates[j].Version); err == nil && cmp != 0 {
+			return cmp > 0
+		}
+		return candidates[i].Dir < candidates[j].Dir
+	})
+	return candidates
+}
+
+func setProfileClosure(db *Database, profile string, packages map[string]InstalledPackage) {
+	if db.Artifacts == nil {
+		db.Artifacts = map[string]InstalledPackage{}
+	}
+	if db.ProfileClosures == nil {
+		db.ProfileClosures = map[string]map[string]string{}
+	}
+	closure := make(map[string]string, len(packages))
+	for name, pkg := range packages {
+		artifactID := pkg.Dir
+		closure[normalizePackageName(name)] = artifactID
+		db.Artifacts[artifactID] = pkg
+	}
+	db.ProfileClosures[profile] = closure
+}
 
 func isSHA256(value string) bool {
 	if len(value) != 64 {
@@ -238,6 +442,26 @@ func validateDatabase(db Database, storePath string) error {
 	for key, p := range db.LegacyPackages {
 		if err := validateRecord(key, p, true); err != nil {
 			return err
+		}
+	}
+	for artifactID, pkg := range db.Artifacts {
+		if artifactID != pkg.Dir {
+			return fmt.Errorf("artifact identifier does not match Store path: %q", artifactID)
+		}
+		if err := validateRecord(databasePackageKey(pkg.Name), pkg, false); err != nil {
+			return err
+		}
+	}
+	for profile, closure := range db.ProfileClosures {
+		name := strings.TrimSuffix(profile, ".toml")
+		if filename, err := profileFilename(name); err != nil || filename != profile {
+			return fmt.Errorf("invalid profile closure name %q", profile)
+		}
+		for packageName, artifactID := range closure {
+			pkg, exists := db.Artifacts[artifactID]
+			if !exists || databasePackageKey(pkg.Name) != packageName {
+				return fmt.Errorf("profile %q references an invalid artifact for %q", profile, packageName)
+			}
 		}
 	}
 	return nil
