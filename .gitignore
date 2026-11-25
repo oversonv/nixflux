@@ -1,0 +1,6 @@
+/nix/
+/nixflux
+/build/*
+!/build/nixflux-android-arm64
+*.test
+coverage.out
