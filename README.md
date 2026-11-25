@@ -1,7 +1,11 @@
 # NixFlux
 
 <p align="center">
-  <img src="docs/nixflux-banner.svg" alt="NixFlux — profile-based DEB package manager" width="100%">
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.20%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.20 or newer"></a>
+  <a href="https://www.kernel.org/"><img src="https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black" alt="Linux"></a>
+  <a href="https://termux.dev/"><img src="https://img.shields.io/badge/Platform-Termux%20%7C%20Android-2C3E50?logo=android&logoColor=white" alt="Termux and Android"></a>
+  <a href="https://github.com/oversonv/nixflux/blob/main/LICENSE"><img src="https://img.shields.io/github/license/oversonv/nixflux" alt="License"></a>
+  <a href="https://github.com/oversonv/nixflux"><img src="https://img.shields.io/github/stars/oversonv/nixflux?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
