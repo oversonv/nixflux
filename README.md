@@ -1,31 +1,66 @@
 # NixFlux
 
-NixFlux is a Go package manager for Linux and Android/Termux. Repository packages are native Debian binary archives (`.deb`). It does not use the former `.nixflux` repository package format and does not call `dpkg-deb`.
+<p align="center">
+  <img src="docs/nixflux-banner.svg" alt="NixFlux — profile-based DEB package manager" width="100%">
+</p>
 
-## Requirements
+<p align="center">
+  <strong>Профильный менеджер пакетов для Linux и Android/Termux</strong><br>
+  Изолированный Store • независимые среды • управление командами через PATH
+</p>
 
-- Go 1.20 or newer to build from source.
-- `gpgv` at runtime to verify signed APT `Release` metadata.
-- Trusted repository public keys. On Termux these are read from `$PREFIX/share/termux-keyring` and `$PREFIX/etc/apt/trusted.gpg.d`.
-- `xz` only when a repository index or Debian archive uses XZ compression. Plain, gzip, and bzip2 index/archive streams are handled internally.
+<p align="center">
+  <a href="#быстрый-старт"><code>Быстрый старт</code></a>
+  · <a href="#профили"><code>Профили</code></a>
+  · <a href="#конфигурация"><code>Конфигурация</code></a>
+  · <a href="#сборка"><code>Сборка</code></a>
+  · <a href="docs/ARCHITECTURE.md"><code>Архитектура</code></a>
+</p>
 
-Termux packages are built for Bionic and must match the device architecture. NixFlux maps Go `arm64`, `arm`, `386`, and `amd64` to Termux APT architectures `aarch64`, `arm`, `i686`, and `x86_64` respectively.
+NixFlux устанавливает нативные Debian-бинарные пакеты (`.deb`) из APT-репозиториев в приватный изолированный Store. Активный набор определяется выбранным профилем, а не общим глобальным enabled-списком.
 
-Build on Termux:
+- Поддержка Linux и Android/Termux.
+- Независимые профили с собственными конкретными версиями пакетов.
+- Управление репозиториями через `channels.json`.
+- Отдельные persistent default и currently loaded профили.
+- Двусторонняя синхронизация команд профиля с PATH.
+- Атомарные транзакции, журнал восстановления и блокировка процессов.
+- Проверка SHA-256, зависимостей, архивов и Store-пакетов.
+
+> [!IMPORTANT]
+> Пакеты остаются в приватном Store. В PATH публикуются только команды из enabled-списка загруженного профиля.
+
+## Быстрый старт
+
+### Linux
 
 ```sh
-pkg install golang
+go build -o nixflux ./cmd/nixflux
+./nixflux channel list
+./nixflux channel install https://example.org/apt/stable
+./nixflux env install example:package==1.2.3
+./nixflux profiles list
+```
+
+### Termux / Android
+
+```sh
+pkg install golang gpgv xz
 GOOS=android GOARCH=arm64 go build -o nixflux ./cmd/nixflux
+./nixflux channel list
+./nixflux profiles list
 ```
 
-Run the CLI directly from source (the root package is a library now):
+На Android бинарник публикует managed-ссылки в `$PREFIX/bin`. Для обычного Linux используется `$HOME/nix/bin`, который должен быть добавлен в `PATH`.
 
-```sh
-go run ./cmd/nixflux --help
-go run ./cmd/nixflux profiles update
-```
+## Сборка
 
-Run tests and static checks:
+Требования:
+
+- Go 1.20 или новее.
+- `gpgv` для проверки подписанных APT Release-файлов.
+- Доверенный ключ репозитория.
+- `xz` для XZ-сжатых индексов или архивов; он не нужен для plain, gzip и bzip2 потоков.
 
 ```sh
 go test ./...
@@ -34,55 +69,31 @@ go vet ./...
 go build -o nixflux ./cmd/nixflux
 ```
 
-## Default Termux channel
+Разные архитектуры сборки выбираются стандартными переменными Go:
 
-On Android builds, NixFlux creates the official Termux main channel by default:
-
-```json
-{
-  "channels": [
-    { "name": "termux", "url": "https://packages-cf.termux.dev/apt/termux-main", "distribution": "stable", "component": "main" }
-  ]
-}
+```sh
+GOOS=linux GOARCH=amd64 go build -o nixflux ./cmd/nixflux
+GOOS=android GOARCH=arm64 go build -o nixflux ./cmd/nixflux
+GOOS=android GOARCH=arm go build -o nixflux ./cmd/nixflux
 ```
 
-The channel uses the APT distribution `stable`, component `main`, and the runtime Termux architecture. The official Termux repository also publishes root and X11 channels:
+## Профили
 
-```json
-{
-  "channels": [
-    { "name": "termux", "url": "https://packages-cf.termux.dev/apt/termux-main", "distribution": "stable", "component": "main" },
-    { "name": "root", "url": "https://packages-cf.termux.dev/apt/termux-root", "distribution": "root", "component": "stable" },
-    { "name": "x11", "url": "https://packages-cf.termux.dev/apt/termux-x11", "distribution": "x11", "component": "main" }
-  ]
-}
-```
-
-NixFlux loads `dists/<distribution>/Release`, verifies its detached `Release.gpg` signature with `gpgv`, and downloads the matching `Packages` index only when its size and SHA-256 match the signed Release metadata. It supports uncompressed, `.gz`, `.bz2`, and `.xz` Packages indexes. It does not fetch a private `index.json` from an APT repository.
-
-For a custom APT repository, put its trusted public key in the system APT trusted keyring directory or set `NIXFLUX_KEYRING` to a trusted keyring file or directory. Do not disable signature verification for public repositories.
-
-## Configuration and data layout
-
-All mutable NixFlux state lives under `$HOME/nix/`:
+Профиль — независимая рабочая среда с собственным списком пакетов. Payload-файлы остаются в общем Store; профиль хранит только точные targets вида `name==version`.
 
 ```text
-$HOME/nix/
-├── store/                  # Immutable installed package directories
-├── bin/                    # Managed command links on non-Termux; legacy migration source on Termux
-├── staging/                # Temporary transaction data
-├── set/
-│   ├── channels.json       # APT repository configuration
-│   ├── store.json          # NixFlux package database
-│   ├── transaction.json    # Recovery journal, absent when idle
-│   └── nixflux.lock        # Process lock
-└── profiles/
-  ├── profiles.lock       # Persistent default profile filename
-  ├── .current            # Profile loaded into the working environment
-  └── default.toml        # Profile-specific enabled package targets
+profiles.lock  ──► persistent default профиль
+.current       ──► currently loaded профиль
+profiles/*.toml ─► enabled пакетов конкретного профиля
 ```
 
-Example profile `default.toml`:
+| Файл / маркер | Назначение |
+|---|---|
+| `profiles.lock` | Профиль по умолчанию для операций без имени |
+| `.current` | Профиль, команды которого сейчас опубликованы в PATH |
+| `<name>.toml` | Независимый enabled-список пакетов |
+
+### Пример профиля
 
 ```toml
 [profile]
@@ -91,61 +102,147 @@ enabled = [
 ]
 ```
 
-Each profile is an independent TOML file under `$HOME/nix/profiles/`. `profiles.lock` contains only the persistent default profile's filename. `.current` tracks the profile whose commands are currently published; loading a named profile does not change the default. `channels.json` is the only active source of repository configuration. On first startup, legacy `settings.toml` channels and enabled entries are migrated, then the original file is retained as `settings.toml.migrated` (or a numbered variant) for recovery.
-
-Profile `enabled` entries are exact `name==version` targets. `env install` adds or replaces a target in the default profile; `env remove` removes it from the default profile. `profiles update` updates the default profile and loads it, while `profiles update <name>` updates and loads only the named profile without changing `profiles.lock`. Both install missing targets and repair missing or invalid transitive dependencies. `env update` remains an alias for updating the default profile. `nixflux env install <channel>:<name>==latest` resolves `latest` once and stores the concrete repository version. Debian version comparison includes epochs, upstream versions, revisions, and `~` pre-releases.
-
-Run `profiles list`, `profiles install <name>`, and `profiles remove <name>` to manage profile files. Creating a profile starts with an empty enabled list and does not install packages or switch the active environment. Removing the default selects the newest remaining profile by modification time, with a filename tie-breaker. Profiles contain selections only; package payloads remain in the shared Store.
-
-## Debian package handling
-
-NixFlux reads the Debian `ar` container and its `control.tar*` and `data.tar*` members in Go. It validates the archive structure, package name/version/architecture, paths, symlink targets, dependencies, and file checksums. The complete downloaded `.deb` is verified against its signed APT Packages index SHA-256 before extraction.
-
-Package files are unpacked into NixFlux's isolated content-addressed store. Only entrypoints belonging to packages in the currently loaded profile are exposed through symlinks. On Termux, managed links are created directly in `$PREFIX/bin`, which is already in Termux's default `PATH`; on other platforms, links are stored in `$HOME/nix/bin` and that directory must be added to `PATH`. Installed dependency packages are not exposed automatically.
-
-At startup, NixFlux reconciles its managed links against `enabled`. Links created by older builds for packages that are not enabled are removed, but only when the link target is inside the NixFlux store. The old `$HOME/nix/bin` directory is retained only as a migration source for pre-Termux layouts; current Android links are placed in `$PREFIX/bin`. An Android build requires `$PREFIX` to be an absolute path and exits with an error rather than silently publishing commands into a directory outside the normal Termux `PATH`. A missing or non-executable enabled entrypoint is not published; `env update` can repair the package. NixFlux refuses to overwrite an existing Termux command with the same name. When upgrading an older build, run one NixFlux command once so stale links from the previous implementation are reconciled.
-
-NixFlux checks `$PREFIX/var/lib/dpkg/status` on Termux when deciding whether a dependency is already provided by the system. This is read-only: NixFlux does not update or remove packages from the system `dpkg` database and does not replace `pkg` or APT.
-
-NixFlux keeps package payloads in its private store. On Termux it creates only managed command symlinks in `$PREFIX/bin`; it does not unpack package payload files over the Termux prefix or alter the system dynamic-loader configuration. Dependencies already installed in Termux can satisfy package requirements. A dependency downloaded into the private NixFlux store is tracked and stored there, but arbitrary native binaries that require that dependency through the system ELF loader are not guaranteed to run without an explicit runtime wrapper/library-path integration. This is an intentional boundary of the current isolated-store implementation, not full `dpkg` runtime compatibility.
-
-### Current Debian compatibility boundaries
-
-Implemented: `Depends` and `Pre-Depends`, version constraints, alternative dependencies, architecture restrictions, regular files, directories, relative symlinks, supported absolute symlinks within known package prefixes, and regular-file hardlinks.
-
-Not implemented: package maintainer scripts (`preinst`, `postinst`, `prerm`, `postrm`, `config`), triggers, conffile upgrade semantics, virtual package resolution (`Provides`), package conflict/replacement semantics, `Recommends`/`Suggests`, and complete Multi-Arch rules. Packages requiring maintainer scripts or unsupported special filesystem nodes are rejected rather than installed partially. XZ-compressed members require the `xz` executable; `dpkg-deb` is not required.
-
-The DEB parser creates an internal staging archive for NixFlux's private store. That staging representation is not a repository package format and is never downloaded from a channel.
-
-## Commands
-
 ```sh
-./nixflux --help
-./nixflux version
-
-./nixflux channel install https://packages-cf.termux.dev/apt/termux-main
-./nixflux channel list
-./nixflux channel fetch termux
-./nixflux channel remove termux
-
-./nixflux env install termux:neofetch==latest
-./nixflux env install termux:neofetch==7.1.0-1
-./nixflux env list
-./nixflux env freeze neofetch==7.1.0-1
-./nixflux env frozen
-./nixflux env unfreeze neofetch==7.1.0-1
-./nixflux env remove neofetch==7.1.0-1
-
-./nixflux profiles list
-./nixflux profiles install work
-./nixflux profiles update
-./nixflux profiles update work
-./nixflux profiles remove work
-./nixflux env update
+nixflux profiles install work       # пустой профиль, без установки пакетов
+nixflux profiles update work        # обновить и загрузить work
+nixflux profiles update             # обновить persistent default из profiles.lock
+nixflux profiles list               # отметить default и показать все профили
+nixflux profiles remove work        # удалить только профильный TOML
 ```
 
-An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade an installed package. Downgrades selected by a profile's exact targets are handled by `profiles update` / `env update`. Frozen packages cannot change versions. Removing a package required by another installed NixFlux package is rejected. `env remove` also removes that package from the default profile, so a later default-profile update does not reinstall it.
+`profiles update work` не изменяет `profiles.lock`: named profile влияет только на loaded environment.
 
-## Atomicity and recovery
+## Конфигурация
 
-Install and remove operations stage package contents and write a transaction journal before changing store directories, entrypoint links, the package database, or a profile. The journal stores prior profile and loaded-profile state so an interrupted operation can restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.
+Все mutable-состояние хранится под `$HOME/nix/`:
+
+```text
+$HOME/nix/
+├── store/                  # Изолированные директории пакетов
+├── staging/                # Временные данные атомарных транзакций
+├── bin/                    # Линковочная директория для обычного Linux
+├── set/
+│   ├── channels.json       # Единственный источник репозиториев
+│   ├── store.json          # Установленные пакеты и metadata
+│   ├── transaction.json    # Журнал незавершённой транзакции
+│   └── nixflux.lock        # Блокировка процесса
+└── profiles/
+    ├── profiles.lock       # Persistent default профиль
+    ├── .current            # Currently loaded профиль
+    └── <name>.toml         # Enabled-пакеты профиля
+```
+
+| Источник | Роль |
+|---|---|
+| `channels.json` | Репозитории и параметры APT-загрузки |
+| `<name>.toml` | Активные package targets выбранного профиля |
+| `store.json` | Физически установленные Store-пакеты и dependencies |
+| `profiles.lock` | Профиль по умолчанию для операций без имени |
+| `.current` | Профиль, определяющий опубликованные команды |
+
+При первой миграции legacy `settings.toml` сохраняется как `settings.toml.migrated` (или с номерным суффиксом). Сам `settings.toml` больше не является runtime-конфигурацией.
+
+## Репозитории
+
+`channels.json` является единственным активным источником конфигурации репозиториев. Список каналов сохраняет порядок и поля репозитория:
+
+```json
+{
+  "channels": [
+    {
+      "name": "main",
+      "url": "https://mirror.example/apt/stable",
+      "distribution": "stable",
+      "component": "main",
+      "architecture": "amd64"
+    }
+  ]
+}
+```
+
+На Android сборках NixFlux может создать официальный канал Termux автоматически:
+
+```json
+{
+  "name": "termux",
+  "url": "https://packages-cf.termux.dev/apt/termux-main",
+  "distribution": "stable",
+  "component": "main"
+}
+```
+
+NixFlux загружает `dists/<distribution>/Release`, проверяет подпись через `gpgv`, после чего скачивает Packages-индекс только если он соответствует подписанным размеру и SHA-256.
+
+## Установка и Store
+
+NixFlux читает Debian `ar`, затем `control.tar*` и `data.tar*`, проверяет имя, версию, архитектуру, пути, symlinks, hardlinks, dependencies и контрольные суммы файлов. Загруженный `.deb` проверяется по SHA-256 из подписанного APT Packages-индекса.
+
+Package payload распаковывается в изолированный content-addressed Store. Файлы не копируются в домашний profile и не становятся копиями пакетов внутри профиля.
+
+### Platform behavior
+
+| Платформа | Managed-ссылки | Особенности |
+|---|---|---|
+| Linux | `$HOME/nix/bin` | Каталог должен быть добавлен в `PATH` |
+| Android / Termux | `$PREFIX/bin` | Текущие managed-ссылки размещаются в стандартном Termux `PATH` |
+
+При старте и после переключения профиля NixFlux сравнивает полный desired-набор ссылок с существующими managed-ссылками. Сторонние бинарники и ссылки вне NixFlux Store не удаляются.
+
+На Termux система `$PREFIX/var/lib/dpkg/status` используется только для определения уже предоставленных system dependencies. NixFlux не изменяет dpkg-базу и не заменяет системный `pkg` / APT.
+
+## Поток состояния
+
+```mermaid
+flowchart LR
+    C[channels.json] --> R[Repository resolver]
+    P[loaded profile TOML] --> E[Enabled package targets]
+    E --> U[Update / install plan]
+    R --> U
+    U --> S[Isolated Store]
+    U --> DB[store.json]
+    U --> T[Transaction journal]
+    S --> L[Profile command links]
+    P --> L
+```
+
+## Совместимость пакетов
+
+Реализовано: `Depends`, `Pre-Depends`, alternatives, version constraints, architecture restrictions, regular files, directories, relative symlinks, поддерживаемые absolute symlinks и regular-file hardlinks.
+
+Не реализовано: maintainer scripts, triggers, conffile semantics, `Provides`, conflict/replacement semantics, `Recommends`, `Suggests` и полные Multi-Arch rules. Пакеты с неподдерживаемыми файлами отклоняются вместо частичной установки.
+
+## Команды
+
+```sh
+nixflux --help
+nixflux version
+
+# Репозитории
+nixflux channel install https://mirror.example/apt/stable
+nixflux channel list
+nixflux channel fetch main
+nixflux channel remove main
+
+# Пакеты persistent default профиля
+nixflux env install main:neofetch==latest
+nixflux env install main:neofetch==7.1.0-1
+nixflux env list
+nixflux env freeze neofetch==7.1.0-1
+nixflux env frozen
+nixflux env unfreeze neofetch==7.1.0-1
+nixflux env remove neofetch==7.1.0-1
+
+# Профили
+nixflux profiles list
+nixflux profiles install work
+nixflux profiles update work
+nixflux profiles update
+nixflux profiles remove work
+nixflux env update
+```
+
+Требуется точная версия для удаления, заморозки и разморозки. Обычная установка не понижает версию установленного пакета. Понижения, выбранные точными целями профиля, обрабатываются `profiles update` / `env update`. Замороженные пакеты не могут менять версии. Удаление пакета, требуемого другим установленным пакетом NixFlux, отклоняется. `env remove` также удаляет этот пакет из профиля по умолчанию, чтобы последующее обновление профиля по умолчанию не переустанавливало его.
+
+## Атомарность и восстановление
+
+Операции установки и удаления временно сохраняют содержимое пакетов и записывают журнал транзакций перед изменением директорий хранилища, ссылок на точки входа, базы данных пакетов или профиля. Журнал хранит предыдущее состояние профиля и загруженного профиля, чтобы прерванная операция могла восстановить конфигурацию и состояние пакетов вместе. Прерванные транзакции восстанавливаются следующей командой. Мутирующие команды сериализуются с блокировкой процесса.
