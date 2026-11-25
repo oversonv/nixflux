@@ -18,11 +18,14 @@ commands:
   env unfreeze <name==version>
   env frozen
   env update
-  set update
   channel install <url>
   channel remove <name>
   channel list
   channel fetch <name>
+	profiles list
+	profiles install <name>
+	profiles remove <name>
+	profiles update [name]
 
 options:
   -h, --help   show this message and exit
@@ -30,7 +33,8 @@ options:
 
 var commandArgumentCounts = map[string]int{
 	"env install": 1, "env remove": 1, "env list": 0, "env freeze": 1, "env unfreeze": 1, "env frozen": 0, "env update": 0,
-	"set update": 0, "channel install": 1, "channel remove": 1, "channel list": 0, "channel fetch": 1,
+	"channel install": 1, "channel remove": 1, "channel list": 0, "channel fetch": 1,
+	"profiles list": 0, "profiles install": 1, "profiles remove": 1, "profiles update": 0,
 }
 
 func parseArguments(argv []string) ([]string, bool, error) {
@@ -87,10 +91,13 @@ func runCLI(argv []string) int {
 		return reportError(appError("unknown_command", command))
 	}
 	args := positional[2:]
+	if command == "profiles update" && len(args) > 1 {
+		return reportError(appError("too_many_args", strings.Join(args[1:], " ")))
+	}
 	if len(args) < expected {
 		return reportError(appError("missing_args", ""))
 	}
-	if len(args) > expected {
+	if command != "profiles update" && len(args) > expected {
 		return reportError(appError("too_many_args", strings.Join(args[expected:], " ")))
 	}
 	arg := ""
@@ -114,6 +121,12 @@ func runCLI(argv []string) int {
 	case "channel remove", "channel fetch":
 		if !channelNamePattern.MatchString(arg) {
 			return reportError(appError("invalid_config", "invalid channel name"))
+		}
+	case "profiles install", "profiles remove", "profiles update":
+		if arg != "" {
+			if _, err := profileFilename(arg); err != nil {
+				return reportError(err)
+			}
 		}
 	}
 	home, err := fetchPathHome()
@@ -197,14 +210,18 @@ func runCLI(argv []string) int {
 		for _, line := range lines {
 			fmt.Println(line)
 		}
-	case "set update", "env update":
+	case "env update":
 		if err := setUpdate(paths); err != nil {
 			return reportError(err)
 		}
-		if len(settings.Enabled) == 0 {
+		updatedProfile, err := loadDefaultSettings(paths)
+		if err != nil {
+			return reportError(err)
+		}
+		if len(updatedProfile.Enabled) == 0 {
 			fmt.Println("No enabled packages to update.")
 		} else {
-			fmt.Printf("Updated packages from settings.toml.\nCompleted in %.2fs\n", time.Since(started).Seconds())
+			fmt.Printf("Updated packages from the default profile.\nCompleted in %.2fs\n", time.Since(started).Seconds())
 		}
 	case "channel install":
 		if err := channelInstall(paths, arg); err != nil {
@@ -230,6 +247,29 @@ func runCLI(argv []string) int {
 			return reportError(err)
 		}
 		renderChannelFetch(channel, status)
+	case "profiles list":
+		if err := renderProfiles(paths); err != nil {
+			return reportError(err)
+		}
+	case "profiles install":
+		if err := installProfile(paths, arg); err != nil {
+			return reportError(err)
+		}
+		fmt.Printf("Profile %s installed.\n", arg)
+	case "profiles remove":
+		if err := removeProfile(paths, arg); err != nil {
+			return reportError(err)
+		}
+		fmt.Printf("Profile %s removed.\n", arg)
+	case "profiles update":
+		if err := updateProfile(paths, arg, true); err != nil {
+			return reportError(err)
+		}
+		if arg == "" {
+			fmt.Printf("Updated default profile.\nCompleted in %.2fs\n", time.Since(started).Seconds())
+		} else {
+			fmt.Printf("Updated and loaded profile %s.\nCompleted in %.2fs\n", arg, time.Since(started).Seconds())
+		}
 	}
 	return 0
 }

@@ -27,6 +27,15 @@ type transactionJournal struct {
 	SettingsExisted bool              `json:"settings_existed,omitempty"`
 	SettingsBackup  []byte            `json:"settings_backup,omitempty"`
 	SettingsContent []byte            `json:"settings_content,omitempty"`
+	ProfileChanged  bool              `json:"profile_changed,omitempty"`
+	ProfileName     string            `json:"profile_name,omitempty"`
+	ProfileExisted  bool              `json:"profile_existed,omitempty"`
+	ProfileBackup   []byte            `json:"profile_backup,omitempty"`
+	ProfileContent  []byte            `json:"profile_content,omitempty"`
+	CurrentProfileChanged  bool       `json:"current_profile_changed,omitempty"`
+	CurrentProfileExisted  bool       `json:"current_profile_existed,omitempty"`
+	CurrentProfileBackup   []byte     `json:"current_profile_backup,omitempty"`
+	CurrentProfileContent  []byte     `json:"current_profile_content,omitempty"`
 	Moves           []transactionMove `json:"moves"`
 	Links           []transactionLink `json:"links"`
 }
@@ -106,6 +115,26 @@ func validateTransactionJournal(paths AppPaths, journal transactionJournal) erro
 			return fmt.Errorf("invalid settings content in transaction: %w", err)
 		}
 	}
+	if journal.ProfileChanged {
+		_, err := profilePath(paths, journal.ProfileName)
+		if err != nil {
+			return fmt.Errorf("invalid profile in transaction: %w", err)
+		}
+		if _, err := parseProfileTOML(string(journal.ProfileContent)); err != nil {
+			return fmt.Errorf("invalid profile content in transaction: %w", err)
+		}
+	}
+	if journal.CurrentProfileChanged {
+		filename := strings.TrimSpace(string(journal.CurrentProfileContent))
+		path, err := profilePath(paths, filename)
+		if err != nil {
+			return fmt.Errorf("invalid current profile in transaction: %w", err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("current profile in transaction does not exist")
+		}
+	}
 	return nil
 }
 
@@ -148,6 +177,17 @@ func applyTransaction(paths AppPaths, journal transactionJournal, db Database) e
 	}
 	if journal.SettingsChanged {
 		if err := atomicWriteFile(paths.Settings, journal.SettingsContent, 0o644); err != nil {
+			return fail(err)
+		}
+	}
+	if journal.ProfileChanged {
+		path, _ := profilePath(paths, journal.ProfileName)
+		if err := atomicWriteFile(path, journal.ProfileContent, 0o644); err != nil {
+			return fail(err)
+		}
+	}
+	if journal.CurrentProfileChanged {
+		if err := atomicWriteFile(paths.CurrentProfile, journal.CurrentProfileContent, 0o600); err != nil {
 			return fail(err)
 		}
 	}
@@ -244,6 +284,29 @@ func rollbackTransaction(paths AppPaths, journal transactionJournal) error {
 				first = err
 			}
 		} else if err := os.Remove(paths.Settings); err != nil && !os.IsNotExist(err) && first == nil {
+			first = err
+		}
+	}
+	if journal.ProfileChanged {
+		path, pathErr := profilePath(paths, journal.ProfileName)
+		if pathErr != nil && first == nil {
+			first = pathErr
+		} else if pathErr == nil {
+			if journal.ProfileExisted {
+				if err := atomicWriteFile(path, journal.ProfileBackup, 0o644); err != nil && first == nil {
+					first = err
+				}
+			} else if err := os.Remove(path); err != nil && !os.IsNotExist(err) && first == nil {
+				first = err
+			}
+		}
+	}
+	if journal.CurrentProfileChanged {
+		if journal.CurrentProfileExisted {
+			if err := atomicWriteFile(paths.CurrentProfile, journal.CurrentProfileBackup, 0o600); err != nil && first == nil {
+				first = err
+			}
+		} else if err := os.Remove(paths.CurrentProfile); err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
 		}
 	}

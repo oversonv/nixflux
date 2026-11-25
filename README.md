@@ -22,7 +22,7 @@ Run the CLI directly from source (the root package is a library now):
 
 ```sh
 go run ./cmd/nixflux --help
-go run ./cmd/nixflux set update
+go run ./cmd/nixflux profiles update
 ```
 
 Run tests and static checks:
@@ -38,24 +38,24 @@ go build -o nixflux ./cmd/nixflux
 
 On Android builds, NixFlux creates the official Termux main channel by default:
 
-```toml
-channels = [
-  { name = "termux", url = "https://packages-cf.termux.dev/apt/termux-main", distribution = "stable", component = "main" },
-]
-
-enabled = []
+```json
+{
+  "channels": [
+    { "name": "termux", "url": "https://packages-cf.termux.dev/apt/termux-main", "distribution": "stable", "component": "main" }
+  ]
+}
 ```
 
 The channel uses the APT distribution `stable`, component `main`, and the runtime Termux architecture. The official Termux repository also publishes root and X11 channels:
 
-```toml
-channels = [
-  { name = "termux", url = "https://packages-cf.termux.dev/apt/termux-main", distribution = "stable", component = "main" },
-  { name = "root", url = "https://packages-cf.termux.dev/apt/termux-root", distribution = "root", component = "stable" },
-  { name = "x11", url = "https://packages-cf.termux.dev/apt/termux-x11", distribution = "x11", component = "main" },
-]
-
-enabled = []
+```json
+{
+  "channels": [
+    { "name": "termux", "url": "https://packages-cf.termux.dev/apt/termux-main", "distribution": "stable", "component": "main" },
+    { "name": "root", "url": "https://packages-cf.termux.dev/apt/termux-root", "distribution": "root", "component": "stable" },
+    { "name": "x11", "url": "https://packages-cf.termux.dev/apt/termux-x11", "distribution": "x11", "component": "main" }
+  ]
+}
 ```
 
 NixFlux loads `dists/<distribution>/Release`, verifies its detached `Release.gpg` signature with `gpgv`, and downloads the matching `Packages` index only when its size and SHA-256 match the signed Release metadata. It supports uncompressed, `.gz`, `.bz2`, and `.xz` Packages indexes. It does not fetch a private `index.json` from an APT repository.
@@ -71,34 +71,37 @@ $HOME/nix/
 ├── store/                  # Immutable installed package directories
 ├── bin/                    # Managed command links on non-Termux; legacy migration source on Termux
 ├── staging/                # Temporary transaction data
-└── set/
-    ├── settings.toml       # APT channels and enabled package targets
-    ├── store.json          # NixFlux package database
-    ├── transaction.json    # Recovery journal, absent when idle
-    └── nixflux.lock        # Process lock
+├── set/
+│   ├── channels.json       # APT repository configuration
+│   ├── store.json          # NixFlux package database
+│   ├── transaction.json    # Recovery journal, absent when idle
+│   └── nixflux.lock        # Process lock
+└── profiles/
+  ├── profiles.lock       # Persistent default profile filename
+  ├── .current            # Profile loaded into the working environment
+  └── default.toml        # Profile-specific enabled package targets
 ```
 
-Example `settings.toml`:
+Example profile `default.toml`:
 
 ```toml
-channels = [
-  { name = "termux", url = "https://packages-cf.termux.dev/apt/termux-main", distribution = "stable", component = "main" },
-]
-
+[profile]
 enabled = [
   "neofetch==7.1.0-1",
 ]
 ```
 
-`enabled` entries are exact `name==version` targets for environment synchronization. `nixflux env install <channel>:<name>==latest` resolves `latest` once and stores the concrete version returned by the repository, not the word `latest`. The `latest` selector is therefore an installation-time convenience, not a rolling update policy. `nixflux set update` and its alias `nixflux env update` enforce the exact versions currently listed in `enabled`; they install missing targets and repair missing or invalid transitive dependencies. Debian version comparison includes epochs, upstream versions, revisions, and `~` pre-releases.
+Each profile is an independent TOML file under `$HOME/nix/profiles/`. `profiles.lock` contains only the persistent default profile's filename. `.current` tracks the profile whose commands are currently published; loading a named profile does not change the default. `channels.json` is the only active source of repository configuration. On first startup, legacy `settings.toml` channels and enabled entries are migrated, then the original file is retained as `settings.toml.migrated` (or a numbered variant) for recovery.
 
-`enabled` is the authoritative desired set for user-requested packages. `env install` adds or replaces that package's target in `enabled`; `env remove` removes the target by package name. An installed package that is not listed in `enabled` is not exposed as a command. Packages installed only as dependencies remain available in the private store but their entrypoints are not published unless the package is explicitly installed as a target itself. A package listed in `enabled` but missing from the database is restored by `set update` / `env update`. Each normalized package name can have only one enabled version; conflicting version rows are rejected instead of being silently resolved by choosing one.
+Profile `enabled` entries are exact `name==version` targets. `env install` adds or replaces a target in the default profile; `env remove` removes it from the default profile. `profiles update` updates the default profile and loads it, while `profiles update <name>` updates and loads only the named profile without changing `profiles.lock`. Both install missing targets and repair missing or invalid transitive dependencies. `env update` remains an alias for updating the default profile. `nixflux env install <channel>:<name>==latest` resolves `latest` once and stores the concrete repository version. Debian version comparison includes epochs, upstream versions, revisions, and `~` pre-releases.
+
+Run `profiles list`, `profiles install <name>`, and `profiles remove <name>` to manage profile files. Creating a profile starts with an empty enabled list and does not install packages or switch the active environment. Removing the default selects the newest remaining profile by modification time, with a filename tie-breaker. Profiles contain selections only; package payloads remain in the shared Store.
 
 ## Debian package handling
 
 NixFlux reads the Debian `ar` container and its `control.tar*` and `data.tar*` members in Go. It validates the archive structure, package name/version/architecture, paths, symlink targets, dependencies, and file checksums. The complete downloaded `.deb` is verified against its signed APT Packages index SHA-256 before extraction.
 
-Package files are unpacked into NixFlux's isolated content-addressed store. Only entrypoints belonging to packages listed in `settings.toml` `enabled` are exposed through symlinks. On Termux, managed links are created directly in `$PREFIX/bin`, which is already in Termux's default `PATH`; on other platforms, links are stored in `$HOME/nix/bin` and that directory must be added to `PATH`. Installed dependency packages are not exposed automatically.
+Package files are unpacked into NixFlux's isolated content-addressed store. Only entrypoints belonging to packages in the currently loaded profile are exposed through symlinks. On Termux, managed links are created directly in `$PREFIX/bin`, which is already in Termux's default `PATH`; on other platforms, links are stored in `$HOME/nix/bin` and that directory must be added to `PATH`. Installed dependency packages are not exposed automatically.
 
 At startup, NixFlux reconciles its managed links against `enabled`. Links created by older builds for packages that are not enabled are removed, but only when the link target is inside the NixFlux store. The old `$HOME/nix/bin` directory is retained only as a migration source for pre-Termux layouts; current Android links are placed in `$PREFIX/bin`. An Android build requires `$PREFIX` to be an absolute path and exits with an error rather than silently publishing commands into a directory outside the normal Termux `PATH`. A missing or non-executable enabled entrypoint is not published; `env update` can repair the package. NixFlux refuses to overwrite an existing Termux command with the same name. When upgrading an older build, run one NixFlux command once so stale links from the previous implementation are reconciled.
 
@@ -133,12 +136,16 @@ The DEB parser creates an internal staging archive for NixFlux's private store. 
 ./nixflux env unfreeze neofetch==7.1.0-1
 ./nixflux env remove neofetch==7.1.0-1
 
-./nixflux set update
+./nixflux profiles list
+./nixflux profiles install work
+./nixflux profiles update
+./nixflux profiles update work
+./nixflux profiles remove work
 ./nixflux env update
 ```
 
-An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade an installed package. Downgrades selected by exact `settings.toml` targets are handled by `set update` / `env update`. Frozen packages cannot change versions. Removing a package required by another installed NixFlux package is rejected. `env remove` also removes that package from `enabled`, so a later environment update does not reinstall it.
+An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade an installed package. Downgrades selected by a profile's exact targets are handled by `profiles update` / `env update`. Frozen packages cannot change versions. Removing a package required by another installed NixFlux package is rejected. `env remove` also removes that package from the default profile, so a later default-profile update does not reinstall it.
 
 ## Atomicity and recovery
 
-Install and remove operations stage package contents and write a transaction journal before changing store directories, entrypoint links, the package database, or `settings.toml`. The journal stores the previous settings bytes so an interrupted operation can restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.
+Install and remove operations stage package contents and write a transaction journal before changing store directories, entrypoint links, the package database, or a profile. The journal stores prior profile and loaded-profile state so an interrupted operation can restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.

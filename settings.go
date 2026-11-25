@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -21,8 +22,10 @@ type Channel struct {
 }
 
 type Settings struct {
-	Channels []Channel `json:"channels"`
-	Enabled  []string  `json:"enabled"`
+	Channels    []Channel `json:"channels"`
+	Enabled     []string  `json:"enabled"`
+	ProfileName string    `json:"-"`
+	ProfilePath string    `json:"-"`
 }
 
 func defaultSettings() Settings {
@@ -34,51 +37,444 @@ func defaultSettings() Settings {
 }
 
 func loadSettings(paths AppPaths) (Settings, error) {
-	if _, err := os.Stat(paths.Settings); err == nil {
-		data, err := os.ReadFile(paths.Settings)
-		if err != nil {
-			return Settings{}, appError("io_error", err.Error())
+	if err := ensureConfiguration(paths); err != nil {
+		return Settings{}, err
+	}
+	filename, err := readCurrentProfile(paths)
+	if err != nil {
+		return Settings{}, err
+	}
+	return loadProfileSettings(paths, filename)
+}
+
+func loadDefaultSettings(paths AppPaths) (Settings, error) {
+	if err := ensureConfiguration(paths); err != nil {
+		return Settings{}, err
+	}
+	filename, err := readProfileLock(paths)
+	if err != nil {
+		return Settings{}, err
+	}
+	return loadProfileSettings(paths, filename)
+}
+
+func loadNamedSettings(paths AppPaths, name string) (Settings, error) {
+	if err := ensureConfiguration(paths); err != nil {
+		return Settings{}, err
+	}
+	filename, err := profileFilename(name)
+	if err != nil {
+		return Settings{}, err
+	}
+	return loadProfileSettings(paths, filename)
+}
+
+func ensureConfiguration(paths AppPaths) error {
+	if err := os.MkdirAll(paths.Set, 0o755); err != nil {
+		return appError("io_error", err.Error())
+	}
+	if info, err := os.Lstat(paths.Profiles); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return appError("invalid_config", "profiles path must be a real directory")
 		}
-		// Early NixFlux archives shipped this placeholder instead of a valid
-		// settings document. Migrate that exact legacy value to empty defaults.
-		if strings.TrimSpace(string(data)) == "enabled = true" {
-			settings := defaultSettings()
-			if err := saveSettings(paths.Settings, settings); err != nil {
-				return Settings{}, err
-			}
-			return settings, nil
+	} else if os.IsNotExist(err) {
+		if err := os.MkdirAll(paths.Profiles, 0o755); err != nil {
+			return appError("io_error", err.Error())
 		}
-		settings, err := parseSettingsTOML(string(data))
-		if err != nil {
-			return Settings{}, appError("invalid_config", err.Error())
-		}
-		if err := normalizeSettings(&settings); err != nil {
-			return Settings{}, err
-		}
-		return settings, nil
-	} else if !os.IsNotExist(err) {
-		return Settings{}, appError("io_error", err.Error())
+	} else {
+		return appError("io_error", err.Error())
 	}
 
-	settings := defaultSettings()
-	if raw, err := os.ReadFile(paths.LegacyChannels); err == nil {
-		var old struct {
-			Channels []Channel `json:"channels"`
+	var legacy Settings
+	legacyExists := false
+	if raw, err := os.ReadFile(paths.Settings); err == nil {
+		legacyExists = true
+		if strings.TrimSpace(string(raw)) != "enabled = true" {
+			legacy, err = parseSettingsTOML(string(raw))
+			if err != nil {
+				return appError("invalid_config", err.Error())
+			}
+		} else {
+			legacy = defaultSettings()
 		}
-		if err := json.Unmarshal(raw, &old); err != nil {
-			return Settings{}, appError("invalid_config", "legacy channels.json: "+err.Error())
-		}
-		settings.Channels = old.Channels
 	} else if !os.IsNotExist(err) {
-		return Settings{}, appError("io_error", err.Error())
+		return appError("io_error", err.Error())
 	}
+
+	channels, channelsExist, err := readChannels(paths.Channels)
+	if err != nil {
+		return err
+	}
+	if !channelsExist {
+		channels = defaultSettings().Channels
+	}
+	if legacyExists {
+		channels = mergeChannels(channels, legacy.Channels)
+	}
+	channelSettings := Settings{Channels: channels, Enabled: []string{}}
+	if err := normalizeSettings(&channelSettings); err != nil {
+		return err
+	}
+	if !channelsExist || legacyExists {
+		if err := writeChannels(paths.Channels, channelSettings.Channels); err != nil {
+			return appError("io_error", err.Error())
+		}
+	}
+
+	filename, lockExists, err := readOptionalProfileLock(paths)
+	if err != nil {
+		return err
+	}
+	if !lockExists {
+		profiles, listErr := listProfileFilenames(paths)
+		if listErr != nil {
+			return listErr
+		}
+		if len(profiles) == 0 {
+			filename = "default.toml"
+			if err := writeProfile(paths, filename, legacy.Enabled); err != nil {
+				return err
+			}
+		} else {
+			filename = newestProfile(paths, profiles)
+			if legacyExists {
+				settings, loadErr := loadProfileSettings(paths, filename)
+				if loadErr != nil {
+					return loadErr
+				}
+				settings.Enabled = mergeProfileEnabled(settings.Enabled, legacy.Enabled)
+				if err := writeProfile(paths, filename, settings.Enabled); err != nil {
+					return err
+				}
+			}
+		}
+		if err := writeProfileLock(paths, filename); err != nil {
+			return err
+		}
+	} else if legacyExists {
+		settings, loadErr := loadProfileSettings(paths, filename)
+		if loadErr != nil {
+			return loadErr
+		}
+		settings.Enabled = mergeProfileEnabled(settings.Enabled, legacy.Enabled)
+		if err := writeProfile(paths, filename, settings.Enabled); err != nil {
+			return err
+		}
+	}
+	if _, err := profilePath(paths, filename); err != nil {
+		return err
+	}
+	profileInfo, err := os.Lstat(filepath.Join(paths.Profiles, filename))
+	if err != nil || !profileInfo.Mode().IsRegular() {
+		return appError("invalid_config", "profiles.lock references a missing or invalid profile: "+filename)
+	}
+	if _, err := readCurrentProfile(paths); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Stat(paths.CurrentProfile); os.IsNotExist(err) {
+		if err := atomicWriteFile(paths.CurrentProfile, []byte(filename+"\n"), 0o600); err != nil {
+			return appError("io_error", err.Error())
+		}
+	}
+	if legacyExists {
+		archive := paths.Settings + ".migrated"
+		for suffix := 1; ; suffix++ {
+			if _, err := os.Lstat(archive); os.IsNotExist(err) {
+				break
+			} else if err != nil {
+				return appError("io_error", err.Error())
+			}
+			archive = fmt.Sprintf("%s.migrated.%d", paths.Settings, suffix)
+		}
+		if err := os.Rename(paths.Settings, archive); err != nil {
+			return appError("io_error", err.Error())
+		}
+		syncDirectory(paths.Set)
+	}
+	return nil
+}
+
+var profileNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
+func profileFilename(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if !profileNamePattern.MatchString(name) {
+		return "", appError("invalid_config", "profile name must contain only letters, numbers, underscores, and hyphens")
+	}
+	return name + ".toml", nil
+}
+
+func profilePath(paths AppPaths, filename string) (string, error) {
+	if filename == "profiles.lock" || filepath.Base(filename) != filename || !strings.HasSuffix(filename, ".toml") {
+		return "", appError("invalid_config", "invalid profile filename")
+	}
+	name := strings.TrimSuffix(filename, ".toml")
+	valid, err := profileFilename(name)
+	if err != nil || valid != filename {
+		return "", appError("invalid_config", "invalid profile filename")
+	}
+	path := filepath.Join(paths.Profiles, filename)
+	if !pathWithin(paths.Profiles, path) {
+		return "", appError("invalid_config", "profile path is outside the profiles directory")
+	}
+	return path, nil
+}
+
+func readOptionalProfileLock(paths AppPaths) (string, bool, error) {
+	info, err := os.Lstat(paths.ProfilesLock)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, appError("io_error", err.Error())
+	}
+	if !info.Mode().IsRegular() {
+		return "", true, appError("invalid_config", "profiles.lock must be a regular file")
+	}
+	raw, err := os.ReadFile(paths.ProfilesLock)
+	if err != nil {
+		return "", false, appError("io_error", err.Error())
+	}
+	filename := strings.TrimSpace(string(raw))
+	if _, err := profilePath(paths, filename); err != nil {
+		return "", true, appError("invalid_config", "profiles.lock contains an invalid profile filename")
+	}
+	return filename, true, nil
+}
+
+func readProfileLock(paths AppPaths) (string, error) {
+	filename, exists, err := readOptionalProfileLock(paths)
+	if err != nil {
+		return "", err
+	}
+	if !exists {
+		return "", appError("invalid_config", "profiles.lock is missing")
+	}
+	info, err := os.Lstat(filepath.Join(paths.Profiles, filename))
+	if err != nil || !info.Mode().IsRegular() {
+		return "", appError("invalid_config", "profiles.lock references a missing profile: "+filename)
+	}
+	return filename, nil
+}
+
+func readCurrentProfile(paths AppPaths) (string, error) {
+	info, err := os.Lstat(paths.CurrentProfile)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", appError("invalid_config", "current profile marker must be a regular file")
+	}
+	raw, err := os.ReadFile(paths.CurrentProfile)
+	if err != nil {
+		return "", err
+	}
+	filename := strings.TrimSpace(string(raw))
+	if _, err := profilePath(paths, filename); err != nil {
+		return "", appError("invalid_config", "current profile marker contains an invalid filename")
+	}
+	info, err = os.Lstat(filepath.Join(paths.Profiles, filename))
+	if err != nil || !info.Mode().IsRegular() {
+		return "", appError("invalid_config", "current profile does not exist: "+filename)
+	}
+	return filename, nil
+}
+
+func loadProfileSettings(paths AppPaths, filename string) (Settings, error) {
+	path, err := profilePath(paths, filename)
+	if err != nil {
+		return Settings{}, err
+	}
+	channels, exists, err := readChannels(paths.Channels)
+	if err != nil {
+		return Settings{}, err
+	}
+	if !exists {
+		return Settings{}, appError("invalid_config", "channels.json is missing")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return Settings{}, appError("invalid_config", "profile must be a regular file: "+filename)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Settings{}, appError("invalid_config", "profile cannot be read: "+filename)
+	}
+	enabled, err := parseProfileTOML(string(raw))
+	if err != nil {
+		return Settings{}, appError("invalid_config", filename+": "+err.Error())
+	}
+	settings := Settings{Channels: channels, Enabled: enabled, ProfileName: filename, ProfilePath: path}
 	if err := normalizeSettings(&settings); err != nil {
 		return Settings{}, err
 	}
-	if err := saveSettings(paths.Settings, settings); err != nil {
-		return Settings{}, err
-	}
 	return settings, nil
+}
+
+func parseProfileTOML(input string) ([]string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	section := ""
+	var value strings.Builder
+	inArray := false
+	seenEnabled := false
+	for scanner.Scan() {
+		line := strings.TrimSpace(stripTOMLComment(scanner.Text()))
+		if line == "" {
+			continue
+		}
+		if !inArray && strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(line[1 : len(line)-1])
+			if section != "profile" {
+				return nil, fmt.Errorf("unknown section %q", section)
+			}
+			continue
+		}
+		key, raw, ok := strings.Cut(line, "=")
+		if !ok || section != "profile" || strings.TrimSpace(key) != "enabled" || seenEnabled && !inArray {
+			return nil, fmt.Errorf("expected one profile.enabled array")
+		}
+		if !inArray {
+			seenEnabled = true
+			value.Reset()
+			value.WriteString(strings.TrimSpace(raw))
+		} else {
+			value.WriteByte('\n')
+			value.WriteString(line)
+		}
+		inArray = tomlValueNeedsMore(value.String())
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if inArray || !seenEnabled {
+		return nil, fmt.Errorf("profile.enabled must be a TOML array")
+	}
+	items, err := splitTOMLArray(value.String())
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]string, 0, len(items))
+	for _, item := range items {
+		entry, err := parseTOMLString(item)
+		if err != nil {
+			return nil, err
+		}
+		enabled = append(enabled, entry)
+	}
+	return enabled, nil
+}
+
+func encodeProfileTOML(enabled []string) string {
+	var b strings.Builder
+	b.WriteString("[profile]\nenabled = [\n")
+	for _, entry := range enabled {
+		b.WriteString("  ")
+		b.WriteString(strconv.Quote(entry))
+		b.WriteString(",\n")
+	}
+	b.WriteString("]\n")
+	return b.String()
+}
+
+func writeProfile(paths AppPaths, filename string, enabled []string) error {
+	path, err := profilePath(paths, filename)
+	if err != nil {
+		return err
+	}
+	settings := Settings{Channels: []Channel{}, Enabled: enabled}
+	if err := normalizeSettings(&settings); err != nil {
+		return err
+	}
+	return atomicWriteFile(path, []byte(encodeProfileTOML(settings.Enabled)), 0o644)
+}
+
+func writeProfileLock(paths AppPaths, filename string) error {
+	if _, err := profilePath(paths, filename); err != nil {
+		return err
+	}
+	return atomicWriteFile(paths.ProfilesLock, []byte(filename+"\n"), 0o600)
+}
+
+func listProfileFilenames(paths AppPaths) ([]string, error) {
+	entries, err := os.ReadDir(paths.Profiles)
+	if err != nil {
+		return nil, err
+	}
+	filenames := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".toml") {
+			continue
+		}
+		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() {
+			if _, err := profilePath(paths, entry.Name()); err == nil {
+			filenames = append(filenames, entry.Name())
+			}
+		}
+	}
+	sort.Strings(filenames)
+	return filenames, nil
+}
+
+func newestProfile(paths AppPaths, filenames []string) string {
+	newest := filenames[0]
+	newestInfo, _ := os.Stat(filepath.Join(paths.Profiles, newest))
+	for _, filename := range filenames[1:] {
+		info, err := os.Stat(filepath.Join(paths.Profiles, filename))
+		if err != nil {
+			continue
+		}
+		if newestInfo == nil || info.ModTime().After(newestInfo.ModTime()) || info.ModTime().Equal(newestInfo.ModTime()) && filename < newest {
+			newest, newestInfo = filename, info
+		}
+	}
+	return newest
+}
+
+func readChannels(path string) ([]Channel, bool, error) {
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, appError("io_error", err.Error())
+	}
+	var wrapper struct {
+		Channels []Channel `json:"channels"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		var channels []Channel
+		if arrayErr := json.Unmarshal(raw, &channels); arrayErr != nil {
+			return nil, true, appError("invalid_config", "channels.json: "+err.Error())
+		}
+		wrapper.Channels = channels
+	}
+	return wrapper.Channels, true, nil
+}
+
+func writeChannels(path string, channels []Channel) error {
+	data, err := json.MarshalIndent(struct {
+		Channels []Channel `json:"channels"`
+	}{Channels: channels}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, append(data, '\n'), 0o644)
+}
+
+func mergeChannels(primary, additional []Channel) []Channel {
+	merged := append([]Channel(nil), primary...)
+	seen := map[string]bool{}
+	for _, channel := range primary {
+		seen[channel.Name] = true
+	}
+	for _, channel := range additional {
+		if !seen[channel.Name] {
+			merged = append(merged, channel)
+			seen[channel.Name] = true
+		}
+	}
+	return merged
 }
 
 var channelNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
@@ -553,7 +949,10 @@ func channelInstall(paths AppPaths, repoURL string) error {
 		}
 	}
 	settings.Channels = append(settings.Channels, defaultAPTChannel(Channel{Name: name, URL: repoURL}))
-	return saveSettings(paths.Settings, settings)
+	if err := normalizeSettings(&settings); err != nil {
+		return err
+	}
+	return writeChannels(paths.Channels, settings.Channels)
 }
 func channelRemove(paths AppPaths, name string) error {
 	settings, err := loadSettings(paths)
@@ -570,5 +969,28 @@ func channelRemove(paths AppPaths, name string) error {
 		return appError("channel_not_found", name)
 	}
 	settings.Channels = updated
-	return saveSettings(paths.Settings, settings)
+	if err := normalizeSettings(&settings); err != nil {
+		return err
+	}
+	return writeChannels(paths.Channels, settings.Channels)
+}
+
+func mergeProfileEnabled(primary, legacy []string) []string {
+	merged := append([]string(nil), primary...)
+	seen := map[string]bool{}
+	for _, spec := range primary {
+		name, _, err := parsePackageVersion(spec)
+		if err == nil {
+			seen[normalizePackageName(name)] = true
+		}
+	}
+	for _, spec := range legacy {
+		name, _, err := parsePackageVersion(spec)
+		if err != nil || seen[normalizePackageName(name)] {
+			continue
+		}
+		merged = append(merged, spec)
+		seen[normalizePackageName(name)] = true
+	}
+	return merged
 }

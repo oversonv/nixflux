@@ -195,12 +195,14 @@ func ensureInstalledDependencies(paths AppPaths, settings Settings, db Database,
 	return nil
 }
 
-func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettings, newSettings Settings) error {
+func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettings, newSettings, oldActive, newActive Settings, switchLoaded bool) error {
 	if err := normalizeSettings(&newSettings); err != nil {
 		return err
 	}
-	settingsChanged := encodeSettingsTOML(oldSettings) != encodeSettingsTOML(newSettings)
-	if len(plan.Artifacts) == 0 && !settingsChanged {
+	profileChanged := encodeProfileTOML(oldSettings.Enabled) != encodeProfileTOML(newSettings.Enabled)
+	loadedChanged := switchLoaded && oldActive.ProfileName != newActive.ProfileName
+	activeChanged := encodeProfileTOML(oldActive.Enabled) != encodeProfileTOML(newActive.Enabled) || oldActive.ProfileName != newActive.ProfileName
+	if len(plan.Artifacts) == 0 && !profileChanged && !loadedChanged && !activeChanged {
 		return nil
 	}
 	if err := os.MkdirAll(paths.Store, 0o755); err != nil {
@@ -278,7 +280,7 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 		_ = os.RemoveAll(stageRoot)
 		return err
 	}
-	links, err := buildLinkChanges(paths, oldDB, newDB, oldSettings, newSettings)
+	links, err := buildLinkChanges(paths, oldDB, newDB, oldActive, newActive)
 	if err != nil {
 		_ = os.RemoveAll(stageRoot)
 		return err
@@ -289,16 +291,28 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 		return appError("io_error", err.Error())
 	}
 	journal := transactionJournal{StageRoot: stageRoot, DatabaseExisted: exists, DatabaseBackup: backup, Moves: moves, Links: links}
-	if settingsChanged {
-		settingsExisted, settingsBackup, settingsErr := databaseBackup(paths.Settings)
-		if settingsErr != nil {
+	if profileChanged {
+		profileExisted, profileBackup, profileErr := databaseBackup(newSettings.ProfilePath)
+		if profileErr != nil {
 			_ = os.RemoveAll(stageRoot)
-			return appError("io_error", settingsErr.Error())
+			return appError("io_error", profileErr.Error())
 		}
-		journal.SettingsChanged = true
-		journal.SettingsExisted = settingsExisted
-		journal.SettingsBackup = settingsBackup
-		journal.SettingsContent = []byte(encodeSettingsTOML(newSettings))
+		journal.ProfileChanged = true
+		journal.ProfileName = newSettings.ProfileName
+		journal.ProfileExisted = profileExisted
+		journal.ProfileBackup = profileBackup
+		journal.ProfileContent = []byte(encodeProfileTOML(newSettings.Enabled))
+	}
+	if loadedChanged {
+		currentExisted, currentBackup, currentErr := databaseBackup(paths.CurrentProfile)
+		if currentErr != nil {
+			_ = os.RemoveAll(stageRoot)
+			return appError("io_error", currentErr.Error())
+		}
+		journal.CurrentProfileChanged = true
+		journal.CurrentProfileExisted = currentExisted
+		journal.CurrentProfileBackup = currentBackup
+		journal.CurrentProfileContent = []byte(newActive.ProfileName + "\n")
 	}
 	if err := applyTransaction(paths, journal, newDB); err != nil {
 		return appError("transaction_failed", err.Error())
@@ -405,7 +419,11 @@ func envInstall(paths AppPaths, spec string) error {
 	if version == "" {
 		return appError("invalid_env_install_format", spec+"; version is required")
 	}
-	settings, err := loadSettings(paths)
+	settings, err := loadDefaultSettings(paths)
+	if err != nil {
+		return err
+	}
+	active, err := loadSettings(paths)
 	if err != nil {
 		return err
 	}
@@ -430,7 +448,11 @@ func envInstall(paths AppPaths, spec string) error {
 	if err := setEnabledPackage(&newSettings, name, resolvedVersion); err != nil {
 		return err
 	}
-	return commitPackagePlan(paths, db, plan, settings, newSettings)
+	newActive := active
+	if active.ProfilePath == settings.ProfilePath {
+		newActive = newSettings
+	}
+	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, false)
 }
 
 func envRemove(paths AppPaths, spec string) error {
@@ -438,7 +460,11 @@ func envRemove(paths AppPaths, spec string) error {
 	if err != nil {
 		return err
 	}
-	settings, err := loadSettings(paths)
+	settings, err := loadDefaultSettings(paths)
+	if err != nil {
+		return err
+	}
+	active, err := loadSettings(paths)
 	if err != nil {
 		return err
 	}
@@ -486,7 +512,11 @@ func envRemove(paths AppPaths, spec string) error {
 			_ = os.RemoveAll(stageRoot)
 			return appError("io_error", e.Error())
 		}
-		links, linkErr := buildLinkChanges(paths, db, newDB, settings, newSettings)
+		newActive := active
+		if active.ProfilePath == settings.ProfilePath {
+			newActive = newSettings
+		}
+		links, linkErr := buildLinkChanges(paths, db, newDB, active, newActive)
 		if linkErr != nil {
 			_ = os.RemoveAll(stageRoot)
 			return linkErr
@@ -497,16 +527,17 @@ func envRemove(paths AppPaths, spec string) error {
 			return appError("io_error", err.Error())
 		}
 		journal := transactionJournal{StageRoot: stageRoot, DatabaseExisted: exists, DatabaseBackup: backup, Moves: moves, Links: links}
-		if encodeSettingsTOML(settings) != encodeSettingsTOML(newSettings) {
-			settingsExisted, settingsBackup, settingsErr := databaseBackup(paths.Settings)
-			if settingsErr != nil {
+		if encodeProfileTOML(settings.Enabled) != encodeProfileTOML(newSettings.Enabled) {
+			profileExisted, profileBackup, profileErr := databaseBackup(newSettings.ProfilePath)
+			if profileErr != nil {
 				_ = os.RemoveAll(stageRoot)
-				return appError("io_error", settingsErr.Error())
+				return appError("io_error", profileErr.Error())
 			}
-			journal.SettingsChanged = true
-			journal.SettingsExisted = settingsExisted
-			journal.SettingsBackup = settingsBackup
-			journal.SettingsContent = []byte(encodeSettingsTOML(newSettings))
+			journal.ProfileChanged = true
+			journal.ProfileName = newSettings.ProfileName
+			journal.ProfileExisted = profileExisted
+			journal.ProfileBackup = profileBackup
+			journal.ProfileContent = []byte(encodeProfileTOML(newSettings.Enabled))
 		}
 		return applyTransaction(paths, journal, newDB)
 	}
@@ -567,7 +598,11 @@ func envRemove(paths AppPaths, spec string) error {
 		_ = os.RemoveAll(stageRoot)
 		return appError("io_error", e.Error())
 	}
-	links, err := buildLinkChanges(paths, db, newDB, settings, newSettings)
+	newActive := active
+	if active.ProfilePath == settings.ProfilePath {
+		newActive = newSettings
+	}
+	links, err := buildLinkChanges(paths, db, newDB, active, newActive)
 	if err != nil {
 		_ = os.RemoveAll(stageRoot)
 		return err
@@ -578,16 +613,17 @@ func envRemove(paths AppPaths, spec string) error {
 		return err
 	}
 	journal := transactionJournal{StageRoot: stageRoot, DatabaseExisted: exists, DatabaseBackup: backup, Moves: moves, Links: links}
-	if encodeSettingsTOML(settings) != encodeSettingsTOML(newSettings) {
-		settingsExisted, settingsBackup, settingsErr := databaseBackup(paths.Settings)
-		if settingsErr != nil {
+	if encodeProfileTOML(settings.Enabled) != encodeProfileTOML(newSettings.Enabled) {
+		profileExisted, profileBackup, profileErr := databaseBackup(newSettings.ProfilePath)
+		if profileErr != nil {
 			_ = os.RemoveAll(stageRoot)
-			return appError("io_error", settingsErr.Error())
+			return appError("io_error", profileErr.Error())
 		}
-		journal.SettingsChanged = true
-		journal.SettingsExisted = settingsExisted
-		journal.SettingsBackup = settingsBackup
-		journal.SettingsContent = []byte(encodeSettingsTOML(newSettings))
+		journal.ProfileChanged = true
+		journal.ProfileName = newSettings.ProfileName
+		journal.ProfileExisted = profileExisted
+		journal.ProfileBackup = profileBackup
+		journal.ProfileContent = []byte(encodeProfileTOML(newSettings.Enabled))
 	}
 	return applyTransaction(paths, journal, newDB)
 }
@@ -618,7 +654,23 @@ func setFreeze(paths AppPaths, spec string, frozen bool) error {
 }
 
 func setUpdate(paths AppPaths) error {
-	settings, err := loadSettings(paths)
+	return updateProfile(paths, "", true)
+}
+
+func updateProfile(paths AppPaths, name string, makeCurrent bool) error {
+	var settings Settings
+	var err error
+	if name == "" {
+		settings, err = loadDefaultSettings(paths)
+	} else {
+		settings, err = loadNamedSettings(paths, name)
+	}
+	if err != nil {
+		return err
+	}
+	newSettings := cloneSettings(settings)
+	newSettings.Enabled = []string{}
+	active, err := loadSettings(paths)
 	if err != nil {
 		return err
 	}
@@ -628,29 +680,41 @@ func setUpdate(paths AppPaths) error {
 	}
 	plan := newPackagePlan()
 	for _, spec := range settings.Enabled {
-		name, version, err := parsePackageVersion(spec)
+		packageName, oldVersion, err := parsePackageVersion(spec)
 		if err != nil {
 			return err
 		}
 		preferredRepo := ""
-		if installed, exists := db.Packages[normalizePackageName(name)]; exists {
+		if installed, exists := db.Packages[normalizePackageName(packageName)]; exists {
 			preferredRepo = installed.Source
 		}
-		repo, _, resolvedVersion, _, err := findRepositoryVersionCached(settings, name, version, preferredRepo, plan.Indexes)
+		repo, _, resolvedVersion, _, err := findRepositoryVersionCached(settings, packageName, oldVersion, preferredRepo, plan.Indexes)
 		if err != nil {
 			return err
 		}
-		if err := resolvePackage(paths, settings, db, plan, repo, name, resolvedVersion, true); err != nil {
+		if err := resolvePackage(paths, settings, db, plan, repo, packageName, resolvedVersion, true); err != nil {
+			return err
+		}
+		if strings.EqualFold(resolvedVersion, "latest") || !isValidVersion(resolvedVersion) {
+			return appError("invalid_version", "resolver did not produce a concrete package version")
+		}
+		if err := setEnabledPackage(&newSettings, packageName, resolvedVersion); err != nil {
 			return err
 		}
 	}
-	return commitPackagePlan(paths, db, plan, settings, settings)
+	newActive := active
+	if makeCurrent || active.ProfilePath == settings.ProfilePath {
+		newActive = newSettings
+	}
+	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, makeCurrent)
 }
 
 func cloneSettings(settings Settings) Settings {
 	clone := Settings{
-		Channels: append([]Channel(nil), settings.Channels...),
-		Enabled:  append([]string(nil), settings.Enabled...),
+		Channels:    append([]Channel(nil), settings.Channels...),
+		Enabled:     append([]string(nil), settings.Enabled...),
+		ProfileName: settings.ProfileName,
+		ProfilePath: settings.ProfilePath,
 	}
 	return clone
 }

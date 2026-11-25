@@ -11,6 +11,10 @@ type AppPaths struct {
 	Bin            string
 	Set            string
 	Settings       string
+	Channels       string
+	Profiles       string
+	ProfilesLock   string
+	CurrentProfile string
 	Database       string
 	Transaction    string
 	Staging        string
@@ -42,6 +46,10 @@ func pathsForHomeForPlatform(home, goos, prefix string) AppPaths {
 		Bin:            bin,
 		Set:            set,
 		Settings:       filepath.Join(set, "settings.toml"),
+		Channels:       filepath.Join(set, "channels.json"),
+		Profiles:       filepath.Join(root, "profiles"),
+		ProfilesLock:   filepath.Join(root, "profiles", "profiles.lock"),
+		CurrentProfile: filepath.Join(root, "profiles", ".current"),
 		Database:       filepath.Join(set, "store.json"),
 		Transaction:    filepath.Join(set, "transaction.json"),
 		Staging:        filepath.Join(root, "staging"),
