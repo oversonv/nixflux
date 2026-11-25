@@ -19,25 +19,25 @@ type transactionLink struct {
 	NewTarget string `json:"new_target"`
 }
 type transactionJournal struct {
-	State           string            `json:"state"`
-	StageRoot       string            `json:"stage_root"`
-	DatabaseExisted bool              `json:"database_existed"`
-	DatabaseBackup  []byte            `json:"database_backup"`
-	SettingsChanged bool              `json:"settings_changed,omitempty"`
-	SettingsExisted bool              `json:"settings_existed,omitempty"`
-	SettingsBackup  []byte            `json:"settings_backup,omitempty"`
-	SettingsContent []byte            `json:"settings_content,omitempty"`
-	ProfileChanged  bool              `json:"profile_changed,omitempty"`
-	ProfileName     string            `json:"profile_name,omitempty"`
-	ProfileExisted  bool              `json:"profile_existed,omitempty"`
-	ProfileBackup   []byte            `json:"profile_backup,omitempty"`
-	ProfileContent  []byte            `json:"profile_content,omitempty"`
-	CurrentProfileChanged  bool       `json:"current_profile_changed,omitempty"`
-	CurrentProfileExisted  bool       `json:"current_profile_existed,omitempty"`
-	CurrentProfileBackup   []byte     `json:"current_profile_backup,omitempty"`
-	CurrentProfileContent  []byte     `json:"current_profile_content,omitempty"`
-	Moves           []transactionMove `json:"moves"`
-	Links           []transactionLink `json:"links"`
+	State                 string            `json:"state"`
+	StageRoot             string            `json:"stage_root"`
+	DatabaseExisted       bool              `json:"database_existed"`
+	DatabaseBackup        []byte            `json:"database_backup"`
+	SettingsChanged       bool              `json:"settings_changed,omitempty"`
+	SettingsExisted       bool              `json:"settings_existed,omitempty"`
+	SettingsBackup        []byte            `json:"settings_backup,omitempty"`
+	SettingsContent       []byte            `json:"settings_content,omitempty"`
+	ProfileChanged        bool              `json:"profile_changed,omitempty"`
+	ProfileName           string            `json:"profile_name,omitempty"`
+	ProfileExisted        bool              `json:"profile_existed,omitempty"`
+	ProfileBackup         []byte            `json:"profile_backup,omitempty"`
+	ProfileContent        []byte            `json:"profile_content,omitempty"`
+	CurrentProfileChanged bool              `json:"current_profile_changed,omitempty"`
+	CurrentProfileExisted bool              `json:"current_profile_existed,omitempty"`
+	CurrentProfileBackup  []byte            `json:"current_profile_backup,omitempty"`
+	CurrentProfileContent []byte            `json:"current_profile_content,omitempty"`
+	Moves                 []transactionMove `json:"moves"`
+	Links                 []transactionLink `json:"links"`
 }
 
 func recoverTransaction(paths AppPaths) error {
@@ -533,12 +533,13 @@ func reconcileCommandLinks(paths AppPaths, db Database, settings Settings) error
 
 func packageLinkMap(paths AppPaths, db Database, settings Settings) (map[string]string, error) {
 	result := map[string]string{}
+	packages := packagesForProfile(db, settings.ProfileName)
 	for _, spec := range settings.Enabled {
 		name, version, err := parsePackageVersion(spec)
 		if err != nil {
 			return nil, appError("invalid_config", "enabled entry must be name==version: "+spec)
 		}
-		pkg, installed := db.Packages[normalizePackageName(name)]
+		pkg, installed := packages[normalizePackageName(name)]
 		if !installed || !versionsEqual(pkg.Version, version) {
 			continue
 		}

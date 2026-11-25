@@ -83,7 +83,7 @@ GOOS=android GOARCH=arm go build -o nixflux ./cmd/nixflux
 
 ## Profiles
 
-A profile is an independent working environment with its own package list. Payload files remain in the shared Store; a profile stores only exact targets in `name==version` format.
+A profile is an independent working environment with its own package list. Payload files remain in the shared Store; a profile declares exact roots in `name==version` format. NixFlux resolves those roots into a profile-owned dependency closure pinned to verified Store artifacts. Identical artifacts may be shared physically, but a package from another profile is not implicitly considered installed in this one.
 
 ```text
 profiles.lock  ──► persistent default profile
@@ -127,7 +127,7 @@ $HOME/nix/
 ├── bin/                    # Command-link directory on regular Linux
 ├── set/
 │   ├── channels.json       # Sole repository configuration source
-│   ├── store.json          # Installed packages and metadata
+│   ├── store.json          # Shared artifact index and per-profile resolved closures
 │   ├── transaction.json    # Unfinished transaction journal
 │   └── nixflux.lock        # Process lock
 └── profiles/
@@ -140,7 +140,7 @@ $HOME/nix/
 |---|---|
 | `channels.json` | Repository and APT download configuration |
 | `<name>.toml` | Active package targets for a selected profile |
-| `store.json` | Physically installed Store packages and dependencies |
+| `store.json` | Shared verified artifact index and profile-to-artifact closure references |
 | `profiles.lock` | Default profile for commands without a profile name |
 | `.current` | Profile that determines published commands |
 
@@ -245,7 +245,7 @@ nixflux profiles remove work
 nixflux env update
 ```
 
-An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade an installed package. Downgrades selected by exact profile targets are handled by `profiles update` / `env update`. Frozen packages cannot change versions. Removing a package required by another installed NixFlux package is rejected. `env remove` also removes the package from the default profile, so a later default-profile update does not reinstall it.
+An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade a package already selected by the same profile. Downgrades selected by exact profile targets are handled by `profiles update` / `env update`. Freeze state belongs to a profile and exact package version. `env remove` removes a root target from the default profile and recomputes that profile's closure; dependencies still needed by another target remain in the closure. It does not remove shared Store artifacts or alter another profile. Dependencies are never installed into Termux's or Linux's system package database; system packages may satisfy dependencies through read-only detection.
 
 ## Atomicity and Recovery
 
