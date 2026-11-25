@@ -323,7 +323,13 @@ func parseProfileTOML(input string) ([]string, error) {
 		if line == "" {
 			continue
 		}
-		if !inArray && strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+		if inArray {
+			value.WriteByte('\n')
+			value.WriteString(line)
+			inArray = tomlValueNeedsMore(value.String())
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			section = strings.TrimSpace(line[1 : len(line)-1])
 			if section != "profile" {
 				return nil, fmt.Errorf("unknown section %q", section)
@@ -331,17 +337,12 @@ func parseProfileTOML(input string) ([]string, error) {
 			continue
 		}
 		key, raw, ok := strings.Cut(line, "=")
-		if !ok || section != "profile" || strings.TrimSpace(key) != "enabled" || seenEnabled && !inArray {
+		if !ok || section != "profile" || strings.TrimSpace(key) != "enabled" || seenEnabled {
 			return nil, fmt.Errorf("expected one profile.enabled array")
 		}
-		if !inArray {
-			seenEnabled = true
-			value.Reset()
-			value.WriteString(strings.TrimSpace(raw))
-		} else {
-			value.WriteByte('\n')
-			value.WriteString(line)
-		}
+		seenEnabled = true
+		value.Reset()
+		value.WriteString(strings.TrimSpace(raw))
 		inArray = tomlValueNeedsMore(value.String())
 	}
 	if err := scanner.Err(); err != nil {
