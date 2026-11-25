@@ -160,24 +160,31 @@ func runCLI(argv []string) int {
 	switch command {
 	case "env install":
 		before := db
-		if err := envInstall(paths, arg); err != nil {
-			return reportError(err)
+		packageName := packageNameFromSpec(arg)
+		progress := startOperationProgress("Installing " + packageName)
+		installErr := envInstall(paths, arg)
+		progress.finish()
+		if installErr != nil {
+			return reportError(installErr)
 		}
 		after, loadErr := loadDatabase(paths.Database)
 		if loadErr != nil {
 			return reportError(loadErr)
 		}
 		installedVersion := versionFromSpec(arg)
-		if installed, exists := after.Packages[normalizePackageName(packageNameFromSpec(arg))]; exists {
+		if installed, exists := after.Packages[normalizePackageName(packageName)]; exists {
 			installedVersion = installed.Version
 		}
-		renderInstallSuccess(packageNameFromSpec(arg), installedVersion, started, countChangedDependencies(before, after, packageNameFromSpec(arg)))
+		renderInstallSuccess(packageName, installedVersion, started, countChangedDependencies(before, after, packageName))
 	case "env remove":
 		name, version, _ := parsePackageVersion(arg)
-		if err := envRemove(paths, arg); err != nil {
-			return reportError(err)
+		progress := startOperationProgress("Removing " + name)
+		removeErr := envRemove(paths, arg)
+		progress.finish()
+		if removeErr != nil {
+			return reportError(removeErr)
 		}
-		renderSimpleSuccess("Removed", name, version)
+		renderRemoveSuccess(name, version, started)
 	case "env list":
 		db, err := loadDatabase(paths.Database)
 		if err != nil {
