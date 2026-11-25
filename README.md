@@ -5,32 +5,32 @@
 </p>
 
 <p align="center">
-  <strong>Профильный менеджер пакетов для Linux и Android/Termux</strong><br>
-  Изолированный Store • независимые среды • управление командами через PATH
+  <strong>A profile-based package manager for Linux and Android/Termux</strong><br>
+  Isolated Store • independent environments • PATH command management
 </p>
 
 <p align="center">
-  <a href="#быстрый-старт"><code>Быстрый старт</code></a>
-  · <a href="#профили"><code>Профили</code></a>
-  · <a href="#конфигурация"><code>Конфигурация</code></a>
-  · <a href="#сборка"><code>Сборка</code></a>
-  · <a href="docs/ARCHITECTURE.md"><code>Архитектура</code></a>
+  <a href="#quick-start"><code>Quick Start</code></a>
+  · <a href="#profiles"><code>Profiles</code></a>
+  · <a href="#configuration"><code>Configuration</code></a>
+  · <a href="#build"><code>Build</code></a>
+  · <a href="docs/ARCHITECTURE.md"><code>Architecture</code></a>
 </p>
 
-NixFlux устанавливает нативные Debian-бинарные пакеты (`.deb`) из APT-репозиториев в приватный изолированный Store. Активный набор определяется выбранным профилем, а не общим глобальным enabled-списком.
+NixFlux installs native Debian binary packages (`.deb`) from APT repositories into a private, isolated Store. The active package set is determined by the loaded profile, not by a global enabled list.
 
-- Поддержка Linux и Android/Termux.
-- Независимые профили с собственными конкретными версиями пакетов.
-- Управление репозиториями через `channels.json`.
-- Отдельные persistent default и currently loaded профили.
-- Двусторонняя синхронизация команд профиля с PATH.
-- Атомарные транзакции, журнал восстановления и блокировка процессов.
-- Проверка SHA-256, зависимостей, архивов и Store-пакетов.
+- Linux and Android/Termux support.
+- Independent profiles with concrete package versions.
+- Repository configuration through `channels.json`.
+- Separate persistent-default and currently-loaded profiles.
+- Bidirectional synchronization of profile commands with `PATH`.
+- Atomic transactions, recovery journaling, and process locking.
+- SHA-256, dependency, archive, and Store verification.
 
 > [!IMPORTANT]
-> Пакеты остаются в приватном Store. В PATH публикуются только команды из enabled-списка загруженного профиля.
+> Package payloads remain in the private Store. Only commands from the enabled list of the currently loaded profile are published to `PATH`.
 
-## Быстрый старт
+## Quick Start
 
 ### Linux
 
@@ -51,16 +51,16 @@ GOOS=android GOARCH=arm64 go build -o nixflux ./cmd/nixflux
 ./nixflux profiles list
 ```
 
-На Android бинарник публикует managed-ссылки в `$PREFIX/bin`. Для обычного Linux используется `$HOME/nix/bin`, который должен быть добавлен в `PATH`.
+On Android, the binary publishes managed links under `$PREFIX/bin`. On regular Linux, links use `$HOME/nix/bin`, which must be added to `PATH`.
 
-## Сборка
+## Build
 
-Требования:
+Requirements:
 
-- Go 1.20 или новее.
-- `gpgv` для проверки подписанных APT Release-файлов.
-- Доверенный ключ репозитория.
-- `xz` для XZ-сжатых индексов или архивов; он не нужен для plain, gzip и bzip2 потоков.
+- Go 1.20 or newer.
+- `gpgv` to verify signed APT `Release` files.
+- A trusted repository public key.
+- `xz` for XZ-compressed indexes or archives. Plain, gzip, and bzip2 streams are handled internally.
 
 ```sh
 go test ./...
@@ -69,7 +69,7 @@ go vet ./...
 go build -o nixflux ./cmd/nixflux
 ```
 
-Разные архитектуры сборки выбираются стандартными переменными Go:
+Select a target architecture with standard Go environment variables:
 
 ```sh
 GOOS=linux GOARCH=amd64 go build -o nixflux ./cmd/nixflux
@@ -77,23 +77,23 @@ GOOS=android GOARCH=arm64 go build -o nixflux ./cmd/nixflux
 GOOS=android GOARCH=arm go build -o nixflux ./cmd/nixflux
 ```
 
-## Профили
+## Profiles
 
-Профиль — независимая рабочая среда с собственным списком пакетов. Payload-файлы остаются в общем Store; профиль хранит только точные targets вида `name==version`.
+A profile is an independent working environment with its own package list. Payload files remain in the shared Store; a profile stores only exact targets in `name==version` format.
 
 ```text
-profiles.lock  ──► persistent default профиль
-.current       ──► currently loaded профиль
-profiles/*.toml ─► enabled пакетов конкретного профиля
+profiles.lock  ──► persistent default profile
+.current       ──► currently loaded profile
+profiles/*.toml ─► enabled packages for each profile
 ```
 
-| Файл / маркер | Назначение |
+| File / marker | Purpose |
 |---|---|
-| `profiles.lock` | Профиль по умолчанию для операций без имени |
-| `.current` | Профиль, команды которого сейчас опубликованы в PATH |
-| `<name>.toml` | Независимый enabled-список пакетов |
+| `profiles.lock` | Persistent default profile used by commands without a profile name |
+| `.current` | Profile whose commands are currently published to `PATH` |
+| `<name>.toml` | Independent enabled package list |
 
-### Пример профиля
+### Example profile
 
 ```toml
 [profile]
@@ -103,48 +103,48 @@ enabled = [
 ```
 
 ```sh
-nixflux profiles install work       # пустой профиль, без установки пакетов
-nixflux profiles update work        # обновить и загрузить work
-nixflux profiles update             # обновить persistent default из profiles.lock
-nixflux profiles list               # отметить default и показать все профили
-nixflux profiles remove work        # удалить только профильный TOML
+nixflux profiles install work       # create an empty profile without installing packages
+nixflux profiles update work        # update and load work
+nixflux profiles update             # update the persistent default from profiles.lock
+nixflux profiles list               # mark the default and list profiles
+nixflux profiles remove work        # remove only the profile TOML
 ```
 
-`profiles update work` не изменяет `profiles.lock`: named profile влияет только на loaded environment.
+`profiles update work` does not modify `profiles.lock`: a named profile update affects only the loaded environment.
 
-## Конфигурация
+## Configuration
 
-Все mutable-состояние хранится под `$HOME/nix/`:
+All mutable state is stored under `$HOME/nix/`:
 
 ```text
 $HOME/nix/
-├── store/                  # Изолированные директории пакетов
-├── staging/                # Временные данные атомарных транзакций
-├── bin/                    # Линковочная директория для обычного Linux
+├── store/                  # Isolated package directories
+├── staging/                # Temporary atomic transaction data
+├── bin/                    # Command-link directory on regular Linux
 ├── set/
-│   ├── channels.json       # Единственный источник репозиториев
-│   ├── store.json          # Установленные пакеты и metadata
-│   ├── transaction.json    # Журнал незавершённой транзакции
-│   └── nixflux.lock        # Блокировка процесса
+│   ├── channels.json       # Sole repository configuration source
+│   ├── store.json          # Installed packages and metadata
+│   ├── transaction.json    # Unfinished transaction journal
+│   └── nixflux.lock        # Process lock
 └── profiles/
-    ├── profiles.lock       # Persistent default профиль
-    ├── .current            # Currently loaded профиль
-    └── <name>.toml         # Enabled-пакеты профиля
+    ├── profiles.lock       # Persistent default profile
+    ├── .current            # Currently loaded profile
+    └── <name>.toml         # Profile enabled packages
 ```
 
-| Источник | Роль |
+| Source | Role |
 |---|---|
-| `channels.json` | Репозитории и параметры APT-загрузки |
-| `<name>.toml` | Активные package targets выбранного профиля |
-| `store.json` | Физически установленные Store-пакеты и dependencies |
-| `profiles.lock` | Профиль по умолчанию для операций без имени |
-| `.current` | Профиль, определяющий опубликованные команды |
+| `channels.json` | Repository and APT download configuration |
+| `<name>.toml` | Active package targets for a selected profile |
+| `store.json` | Physically installed Store packages and dependencies |
+| `profiles.lock` | Default profile for commands without a profile name |
+| `.current` | Profile that determines published commands |
 
-При первой миграции legacy `settings.toml` сохраняется как `settings.toml.migrated` (или с номерным суффиксом). Сам `settings.toml` больше не является runtime-конфигурацией.
+During the initial migration, legacy `settings.toml` is retained as `settings.toml.migrated` or a numbered variant. `settings.toml` is no longer runtime configuration.
 
-## Репозитории
+## Repositories
 
-`channels.json` является единственным активным источником конфигурации репозиториев. Список каналов сохраняет порядок и поля репозитория:
+`channels.json` is the sole active repository configuration source. The channel list preserves order and repository fields:
 
 ```json
 {
@@ -160,7 +160,7 @@ $HOME/nix/
 }
 ```
 
-На Android сборках NixFlux может создать официальный канал Termux автоматически:
+On Android builds, NixFlux may create the official Termux channel automatically:
 
 ```json
 {
@@ -171,26 +171,26 @@ $HOME/nix/
 }
 ```
 
-NixFlux загружает `dists/<distribution>/Release`, проверяет подпись через `gpgv`, после чего скачивает Packages-индекс только если он соответствует подписанным размеру и SHA-256.
+NixFlux loads `dists/<distribution>/Release`, verifies the signature with `gpgv`, and downloads a Packages index only when it matches the signed size and SHA-256 metadata.
 
-## Установка и Store
+## Installation and Store
 
-NixFlux читает Debian `ar`, затем `control.tar*` и `data.tar*`, проверяет имя, версию, архитектуру, пути, symlinks, hardlinks, dependencies и контрольные суммы файлов. Загруженный `.deb` проверяется по SHA-256 из подписанного APT Packages-индекса.
+NixFlux reads the Debian `ar` container, then `control.tar*` and `data.tar*`, validating package name, version, architecture, paths, symlinks, hardlinks, dependencies, and file checksums. Each downloaded `.deb` is verified against the signed APT Packages index SHA-256.
 
-Package payload распаковывается в изолированный content-addressed Store. Файлы не копируются в домашний profile и не становятся копиями пакетов внутри профиля.
+Package payloads are extracted into a content-addressed Store. Files are not copied into a home profile or maintained as copies inside profiles.
 
 ### Platform behavior
 
-| Платформа | Managed-ссылки | Особенности |
+| Platform | Managed links | Notes |
 |---|---|---|
-| Linux | `$HOME/nix/bin` | Каталог должен быть добавлен в `PATH` |
-| Android / Termux | `$PREFIX/bin` | Текущие managed-ссылки размещаются в стандартном Termux `PATH` |
+| Linux | `$HOME/nix/bin` | The directory must be added to `PATH` |
+| Android / Termux | `$PREFIX/bin` | Managed links are placed in the standard Termux `PATH` |
 
-При старте и после переключения профиля NixFlux сравнивает полный desired-набор ссылок с существующими managed-ссылками. Сторонние бинарники и ссылки вне NixFlux Store не удаляются.
+At startup and after profile switching, NixFlux compares the complete desired link set with existing NixFlux-managed links. Third-party binaries and links outside the NixFlux Store are not removed.
 
-На Termux система `$PREFIX/var/lib/dpkg/status` используется только для определения уже предоставленных system dependencies. NixFlux не изменяет dpkg-базу и не заменяет системный `pkg` / APT.
+On Termux, `$PREFIX/var/lib/dpkg/status` is used only to identify dependencies already provided by the system. NixFlux does not modify the dpkg database or replace system `pkg` / APT.
 
-## Поток состояния
+## State Flow
 
 ```mermaid
 flowchart LR
@@ -205,25 +205,25 @@ flowchart LR
     P --> L
 ```
 
-## Совместимость пакетов
+## Package Compatibility
 
-Реализовано: `Depends`, `Pre-Depends`, alternatives, version constraints, architecture restrictions, regular files, directories, relative symlinks, поддерживаемые absolute symlinks и regular-file hardlinks.
+Implemented: `Depends`, `Pre-Depends`, alternatives, version constraints, architecture restrictions, regular files, directories, relative symlinks, supported absolute symlinks, and regular-file hardlinks.
 
-Не реализовано: maintainer scripts, triggers, conffile semantics, `Provides`, conflict/replacement semantics, `Recommends`, `Suggests` и полные Multi-Arch rules. Пакеты с неподдерживаемыми файлами отклоняются вместо частичной установки.
+Not implemented: maintainer scripts, triggers, conffile semantics, `Provides`, conflict/replacement semantics, `Recommends`, `Suggests`, and complete Multi-Arch rules. Packages containing unsupported files are rejected instead of being partially installed.
 
-## Команды
+## Commands
 
 ```sh
 nixflux --help
 nixflux version
 
-# Репозитории
+# Repositories
 nixflux channel install https://mirror.example/apt/stable
 nixflux channel list
 nixflux channel fetch main
 nixflux channel remove main
 
-# Пакеты persistent default профиля
+# Packages for the persistent default profile
 nixflux env install main:neofetch==latest
 nixflux env install main:neofetch==7.1.0-1
 nixflux env list
@@ -232,7 +232,7 @@ nixflux env frozen
 nixflux env unfreeze neofetch==7.1.0-1
 nixflux env remove neofetch==7.1.0-1
 
-# Профили
+# Profiles
 nixflux profiles list
 nixflux profiles install work
 nixflux profiles update work
@@ -241,8 +241,8 @@ nixflux profiles remove work
 nixflux env update
 ```
 
-Требуется точная версия для удаления, заморозки и разморозки. Обычная установка не понижает версию установленного пакета. Понижения, выбранные точными целями профиля, обрабатываются `profiles update` / `env update`. Замороженные пакеты не могут менять версии. Удаление пакета, требуемого другим установленным пакетом NixFlux, отклоняется. `env remove` также удаляет этот пакет из профиля по умолчанию, чтобы последующее обновление профиля по умолчанию не переустанавливало его.
+An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade an installed package. Downgrades selected by exact profile targets are handled by `profiles update` / `env update`. Frozen packages cannot change versions. Removing a package required by another installed NixFlux package is rejected. `env remove` also removes the package from the default profile, so a later default-profile update does not reinstall it.
 
-## Атомарность и восстановление
+## Atomicity and Recovery
 
-Операции установки и удаления временно сохраняют содержимое пакетов и записывают журнал транзакций перед изменением директорий хранилища, ссылок на точки входа, базы данных пакетов или профиля. Журнал хранит предыдущее состояние профиля и загруженного профиля, чтобы прерванная операция могла восстановить конфигурацию и состояние пакетов вместе. Прерванные транзакции восстанавливаются следующей командой. Мутирующие команды сериализуются с блокировкой процесса.
+Install and remove operations stage package contents and write a transaction journal before changing Store directories, entrypoint links, the package database, or a profile. The journal preserves prior profile and loaded-profile state, allowing an interrupted operation to restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.

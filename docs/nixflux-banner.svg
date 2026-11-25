@@ -14,10 +14,9 @@
   </g>
   <text x="190" y="116" fill="#f8fafc" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="64" font-weight="700">NixFlux</text>
   <text x="194" y="162" fill="#94a3b8" font-family="system-ui,-apple-system,sans-serif" font-size="24">Profiles • APT repositories • isolated DEB store</text>
-  <g transform="translate(900 84)">
-    <rect width="220" height="92" rx="18" fill="#111827" stroke="#334155"/>
-    <circle cx="30" cy="30" r="7" fill="#22c55e"/><circle cx="30" cy="62" r="7" fill="#8b5cf6"/>
-    <text x="52" y="36" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="18">Linux</text>
-    <text x="52" y="68" fill="#e2e8f0" font-family="ui-monospace,monospace" font-size="18">Android</text>
+  <g transform="translate(1080 130)" opacity="0.75">
+    <circle cx="0" cy="0" r="8" fill="#22d3ee"/>
+    <circle cx="30" cy="0" r="8" fill="#67e8f9"/>
+    <circle cx="60" cy="0" r="8" fill="#8b5cf6"/>
   </g>
 </svg>
