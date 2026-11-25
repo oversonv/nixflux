@@ -198,11 +198,11 @@ func databaseForProfile(db Database, settings Settings) Database {
 
 func packagesForProfile(db Database, profile string) map[string]InstalledPackage {
 	packages := map[string]InstalledPackage{}
+	if profile == "" {
+		return packages
+	}
 	closure, hasClosure := db.ProfileClosures[profile]
-	if profile == "" || !hasClosure {
-		for key, pkg := range db.Packages {
-			packages[key] = pkg
-		}
+	if !hasClosure {
 		return packages
 	}
 	for name, artifactID := range closure {
@@ -220,8 +220,19 @@ func ensureProfileClosure(paths AppPaths, db *Database, settings Settings) {
 	if db == nil || settings.ProfileName == "" {
 		return
 	}
-	if _, exists := db.ProfileClosures[settings.ProfileName]; exists {
-		return
+	if closure, exists := db.ProfileClosures[settings.ProfileName]; exists {
+		valid := true
+		for name, artifactID := range closure {
+			pkg, artifactExists := db.Artifacts[artifactID]
+			if !artifactExists || normalizePackageName(pkg.Name) != normalizePackageName(name) || verifyStoredPackage(paths, pkg) != nil {
+				valid = false
+				break
+			}
+		}
+		if valid {
+			return
+		}
+		delete(db.ProfileClosures, settings.ProfileName)
 	}
 	closure := map[string]string{}
 	if db.ProfileFrozen[settings.ProfileName] == nil {
@@ -315,13 +326,25 @@ func setProfileClosure(db *Database, profile string, packages map[string]Install
 	if db.ProfileClosures == nil {
 		db.ProfileClosures = map[string]map[string]string{}
 	}
+	if db.ProfileFrozen == nil {
+		db.ProfileFrozen = map[string]map[string]string{}
+	}
 	closure := make(map[string]string, len(packages))
 	for name, pkg := range packages {
+		key := normalizePackageName(name)
 		artifactID := pkg.Dir
-		closure[normalizePackageName(name)] = artifactID
+		closure[key] = artifactID
 		db.Artifacts[artifactID] = pkg
 	}
 	db.ProfileClosures[profile] = closure
+	if frozen, exists := db.ProfileFrozen[profile]; exists {
+		for name, frozenVersion := range frozen {
+			pkg, selected := packages[name]
+			if !selected || !versionsEqual(pkg.Version, frozenVersion) {
+				delete(frozen, name)
+			}
+		}
+	}
 }
 
 func isSHA256(value string) bool {
