@@ -162,8 +162,8 @@ func installedPackageFromArtifact(artifact PackageArtifact) InstalledPackage {
 		Name: artifact.Manifest.Name, Version: artifact.Manifest.Version,
 		Hash: artifact.Hash, ManifestHash: artifact.ManifestHash,
 		ChecksumsHash: artifact.ChecksumsHash,
-		Dir: packageDirectory(artifact.Hash, artifact.Manifest.Name, artifact.Manifest.Version),
-		Source: artifact.Source, Dependencies: append([]string{}, artifact.Manifest.Dependencies...),
+		Dir:           packageDirectory(artifact.Hash, artifact.Manifest.Name, artifact.Manifest.Version),
+		Source:        artifact.Source, Dependencies: append([]string{}, artifact.Manifest.Dependencies...),
 		Files: append([]string{}, artifact.Files...), Entrypoints: append([]string{}, artifact.Manifest.Entrypoints...),
 		Modes: cloneFileModes(artifact.Modes),
 	}

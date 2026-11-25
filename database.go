@@ -29,12 +29,12 @@ type InstalledPackage struct {
 }
 
 type Database struct {
-	SchemaVersion   int                                    `json:"schema_version"`
-	Packages        map[string]InstalledPackage            `json:"packages"`
-	LegacyPackages  map[string]InstalledPackage            `json:"legacy_packages,omitempty"`
-	Artifacts       map[string]InstalledPackage            `json:"artifacts,omitempty"`
-	ProfileClosures map[string]map[string]string           `json:"profile_closures,omitempty"`
-	ProfileFrozen   map[string]map[string]string           `json:"profile_frozen,omitempty"`
+	SchemaVersion   int                          `json:"schema_version"`
+	Packages        map[string]InstalledPackage  `json:"packages"`
+	LegacyPackages  map[string]InstalledPackage  `json:"legacy_packages,omitempty"`
+	Artifacts       map[string]InstalledPackage  `json:"artifacts,omitempty"`
+	ProfileClosures map[string]map[string]string `json:"profile_closures,omitempty"`
+	ProfileFrozen   map[string]map[string]string `json:"profile_frozen,omitempty"`
 }
 
 func emptyDatabase() Database {
@@ -161,7 +161,7 @@ func databasePackageKey(name string) string { return normalizePackageName(name) 
 func cloneDatabase(db Database) Database {
 	clone := Database{
 		SchemaVersion: databaseSchemaVersion,
-		Packages: map[string]InstalledPackage{}, LegacyPackages: map[string]InstalledPackage{},
+		Packages:      map[string]InstalledPackage{}, LegacyPackages: map[string]InstalledPackage{},
 		Artifacts: map[string]InstalledPackage{}, ProfileClosures: map[string]map[string]string{},
 		ProfileFrozen: map[string]map[string]string{},
 	}
@@ -191,8 +191,8 @@ func cloneDatabase(db Database) Database {
 
 func databaseForProfile(db Database, settings Settings) Database {
 	return Database{
-		Packages: packagesForProfile(db, settings.ProfileName),
-	LegacyPackages: map[string]InstalledPackage{}, Artifacts: db.Artifacts,
+		Packages:       packagesForProfile(db, settings.ProfileName),
+		LegacyPackages: map[string]InstalledPackage{}, Artifacts: db.Artifacts,
 	}
 }
 
