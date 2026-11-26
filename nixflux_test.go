@@ -355,6 +355,10 @@ func makeTestPackage(t *testing.T, name, version string, dependencies []string, 
 }
 
 func newTestRepository(t *testing.T, artifacts map[string][]byte) *httptest.Server {
+	return newTestRepositoryWithRequestHook(t, artifacts, nil)
+}
+
+func newTestRepositoryWithRequestHook(t *testing.T, artifacts map[string][]byte, requestHook func(http.ResponseWriter, *http.Request) bool) *httptest.Server {
 	t.Helper()
 	type artifactEntry struct {
 		filename string
@@ -398,6 +402,9 @@ func newTestRepository(t *testing.T, artifacts map[string][]byte) *httptest.Serv
 	release := fmt.Sprintf("Origin: NixFlux test repository\nSuite: stable\nCodename: stable\nArchitectures: %s\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n", architecture, hex.EncodeToString(sum[:]), len(compressed), architecture)
 	signature := signAPTTestRelease(t, []byte(release))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requestHook != nil && requestHook(w, r) {
+			return
+		}
 		switch r.URL.Path {
 		case "/dists/stable/Release":
 			_, _ = w.Write([]byte(release))

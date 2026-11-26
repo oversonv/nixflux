@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -440,6 +441,112 @@ func TestAPTInstallLatestDebEndToEndWithSystemDependency(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "NixFlux APT integration") {
 		t.Fatalf("unexpected entrypoint output: %q", output)
+	}
+}
+
+func TestCLIProfileRollbackRestoresPreviousPackageWithoutNetwork(t *testing.T) {
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh is unavailable; command execution check skipped")
+	}
+	var offline atomic.Bool
+	var offlineRequests atomic.Int64
+	makeDemo := func(version, marker string) []byte {
+		t.Helper()
+		control := fmt.Sprintf("Package: demo\nVersion: %s\nArchitecture: all\nDescription: rollback integration fixture\n", version)
+		payload := []byte(fmt.Sprintf("#!%s\nprintf '%s\\n'\n", shell, marker))
+		return makeDebFixture(t, control, []debFixtureEntry{{
+			Name: "./data/data/com.termux/files/usr/bin/demo",
+			Data: payload,
+			Mode: 0o755,
+		}}, "")
+	}
+	server := newTestRepositoryWithRequestHook(t, map[string][]byte{
+		"demo-1": makeDemo("1.0.0", "demo-v1"),
+		"demo-2": makeDemo("2.0.0", "demo-v2"),
+	}, func(w http.ResponseWriter, r *http.Request) bool {
+		if !offline.Load() {
+			return false
+		}
+		offlineRequests.Add(1)
+		http.Error(w, "repository unavailable during rollback", http.StatusServiceUnavailable)
+		return true
+	})
+	defer server.Close()
+
+	home := t.TempDir()
+	prefix := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PREFIX", prefix)
+	paths := pathsForHome(home)
+	settings := Settings{Channels: []Channel{{
+		Name: "termux", URL: server.URL, Distribution: "stable", Component: "main", Architecture: runtimeDebianArchitecture(),
+	}}, Enabled: []string{}}
+	if err := saveSettings(paths.Settings, settings); err != nil {
+		t.Fatal(err)
+	}
+	if code := runCLI([]string{"env", "install", "termux:demo==1.0.0"}); code != 0 {
+		t.Fatalf("install version 1.0.0 exited with code %d", code)
+	}
+
+	generations, _, err := listProfileGenerations(paths, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previousGeneration string
+	for _, generation := range generations {
+		if len(generation.Enabled) == 1 && generation.Enabled[0] == "demo==1.0.0" {
+			previousGeneration = generation.ID
+			break
+		}
+	}
+	if previousGeneration == "" {
+		t.Fatalf("generation for demo==1.0.0 not found: %#v", generations)
+	}
+	if code := runCLI([]string{"env", "install", "termux:demo==2.0.0"}); code != 0 {
+		t.Fatalf("install version 2.0.0 exited with code %d", code)
+	}
+	if code := runCLI([]string{"env", "remove", "demo==2.0.0"}); code != 0 {
+		t.Fatalf("remove version 2.0.0 exited with code %d", code)
+	}
+
+	// Rollback must use the retained Store artifact and must not contact APT.
+	offline.Store(true)
+	if code := runCLI([]string{"profiles", "rollback", "default", previousGeneration}); code != 0 {
+		t.Fatalf("offline profile rollback exited with code %d", code)
+	}
+	if count := offlineRequests.Load(); count != 0 {
+		t.Fatalf("rollback made %d repository request(s) while offline", count)
+	}
+	profile, err := loadDefaultSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profile.Enabled) != 1 || profile.Enabled[0] != "demo==1.0.0" {
+		t.Fatalf("rollback did not restore version 1 declaration: %#v", profile.Enabled)
+	}
+	activeGeneration, err := readCurrentGeneration(paths, profile.ProfileName)
+	if err != nil || activeGeneration != previousGeneration {
+		t.Fatalf("rollback active generation = %q, want %q: %v", activeGeneration, previousGeneration, err)
+	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed, ok := databaseForProfile(db, profile).Packages["demo"]
+	if !ok || installed.Version != "1.0.0" {
+		t.Fatalf("profile closure did not restore version 1.0.0: %#v", installed)
+	}
+	if err := verifyStoredPackage(paths, installed); err != nil {
+		t.Fatalf("restored package failed Store verification: %v", err)
+	}
+	link := filepath.Join(paths.Bin, "demo")
+	output, err := exec.Command(link).CombinedOutput()
+	if err != nil {
+		t.Fatalf("restored command did not execute: %v: %s", err, output)
+	}
+	if !strings.Contains(string(output), "demo-v1") {
+		t.Fatalf("rollback executed wrong package payload: %q", output)
 	}
 }
 
