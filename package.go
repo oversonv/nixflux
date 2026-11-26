@@ -32,6 +32,7 @@ type PackageArtifact struct {
 	Files         []string
 	Modes         map[string]uint32
 	Source        string
+	InstalledSize int64
 }
 
 func parsePackageTOML(raw []byte) (PackageManifest, error) {

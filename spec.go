@@ -43,6 +43,10 @@ func parseRepoPackageSpec(spec string) (string, string, string, error) {
 	return repo, name, version, nil
 }
 func parsePackageVersion(spec string) (string, string, error) {
+	return parsePackageVersionWithLatest(spec, false)
+}
+
+func parsePackageVersionWithLatest(spec string, allowLatest bool) (string, string, error) {
 	name, version, found := strings.Cut(spec, "==")
 	if !found || name == "" || version == "" {
 		return "", "", appError("invalid_env_remove_format", spec)
@@ -50,8 +54,10 @@ func parsePackageVersion(spec string) (string, string, error) {
 	if err := validatePackageName(name); err != nil {
 		return "", "", err
 	}
-	if err := validateVersion(version); err != nil {
-		return "", "", err
+	if !(allowLatest && strings.EqualFold(version, "latest")) {
+		if err := validateVersion(version); err != nil {
+			return "", "", err
+		}
 	}
 	return name, version, nil
 }

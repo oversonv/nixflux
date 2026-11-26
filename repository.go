@@ -162,7 +162,28 @@ func downloadRepositoryPackage(baseURL, packageName, version string, entry Repos
 	if err != nil {
 		return PackageArtifact{}, appError("invalid_package", err.Error())
 	}
-	return PackageArtifact{Manifest: manifest, Raw: storeRaw, Hash: packageHash(raw), ManifestHash: manifestHash, ChecksumsHash: checksumsHash, Files: files, Modes: modes, Source: source}, nil
+	installedSize, err := packagePayloadSize(storeRaw)
+	if err != nil {
+		return PackageArtifact{}, appError("invalid_package", err.Error())
+	}
+	return PackageArtifact{Manifest: manifest, Raw: storeRaw, Hash: packageHash(raw), ManifestHash: manifestHash, ChecksumsHash: checksumsHash, Files: files, Modes: modes, Source: source, InstalledSize: installedSize}, nil
+}
+
+func packagePayloadSize(raw []byte) (int64, error) {
+	reader, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return 0, err
+	}
+	var size int64
+	for _, file := range reader.File {
+		if strings.HasPrefix(file.Name, "payload/") && !file.FileInfo().IsDir() {
+			if file.UncompressedSize64 > uint64(^uint64(0)>>1)-uint64(size) {
+				return 0, fmt.Errorf("package payload size overflows int64")
+			}
+			size += int64(file.UncompressedSize64)
+		}
+	}
+	return size, nil
 }
 
 func repositoryChannel(settings Settings, name string) (Channel, bool) {

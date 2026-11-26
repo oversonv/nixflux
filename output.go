@@ -3,14 +3,22 @@ package nixflux
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
-const accentColor = "\033[38;2;28;72;166m"
+const accentColor = "\033[1;38;2;79;156;255m"
 const resetColor = "\033[0m"
 
 func paint(value string) string {
+	if os.Getenv("NO_COLOR") != "" {
+		return value
+	}
+	return paintTransaction(value)
+}
+
+func paintTransaction(value string) string {
 	if os.Getenv("NO_COLOR") != "" {
 		return value
 	}
@@ -33,37 +41,19 @@ func startOperationProgress(label string) *operationProgress {
 	progress := &operationProgress{stop: make(chan struct{}), done: make(chan struct{})}
 	go func() {
 		defer close(progress.done)
-		ticker := time.NewTicker(80 * time.Millisecond)
+		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-		palette := [][3]int{{138, 110, 255}, {105, 130, 255}, {85, 165, 255}, {160, 185, 220}}
 		colorEnabled := os.Getenv("NO_COLOR") == ""
-		const width = 18
-		for frame := 0; ; frame++ {
-			start := frame%(width+4) - 4
-			var bar strings.Builder
-			for i := 0; i < width; i++ {
-				if i >= start && i < start+4 {
-					if colorEnabled {
-						color := palette[(frame+i)%len(palette)]
-						fmt.Fprintf(&bar, "\033[38;2;%d;%d;%dm▰\033[0m", color[0], color[1], color[2])
-					} else {
-						bar.WriteRune('▰')
-					}
-				} else if colorEnabled {
-					bar.WriteString("\033[38;2;65;70;85m─\033[0m")
-				} else {
-					bar.WriteRune('─')
-				}
-			}
+		render := func(frame int) {
 			spinner := frames[frame%len(frames)]
-			labelText := label
 			if colorEnabled {
-				color := palette[frame%len(palette)]
-				spinner = fmt.Sprintf("\033[38;2;%d;%d;%dm%s\033[0m", color[0], color[1], color[2], spinner)
-				labelText = progressGradient(label, frame, palette)
+				spinner = accentColor + spinner + resetColor
 			}
-			fmt.Fprintf(os.Stdout, "\r  %s %s · [%s]\033[K", spinner, labelText, bar.String())
+			fmt.Fprintf(os.Stdout, "\r%s %s\033[K", spinner, label)
+		}
+		for frame := 0; ; frame++ {
+			render(frame)
 			select {
 			case <-progress.stop:
 				fmt.Fprint(os.Stdout, "\r\033[2K")
@@ -75,15 +65,6 @@ func startOperationProgress(label string) *operationProgress {
 	return progress
 }
 
-func progressGradient(value string, offset int, palette [][3]int) string {
-	var result strings.Builder
-	for i, char := range value {
-		color := palette[(i/3+offset)%len(palette)]
-		fmt.Fprintf(&result, "\033[38;2;%d;%d;%dm%c\033[0m", color[0], color[1], color[2], char)
-	}
-	return result.String()
-}
-
 func (progress *operationProgress) finish() {
 	if progress == nil {
 		return
@@ -92,18 +73,81 @@ func (progress *operationProgress) finish() {
 	<-progress.done
 }
 
-func renderInstallSuccess(name, version string, started time.Time, dependencyCount int) {
-	fmt.Printf("%s %s installed successfully.\n", paint(name), paint(version))
-	if dependencyCount > 0 {
-		fmt.Printf("Installed %d dependencies.\n", dependencyCount)
-	}
-	fmt.Printf("Completed in %.2fs\n", time.Since(started).Seconds())
+type PackageTransactionItem struct {
+	Package       InstalledPackage
+	DownloadSize  int64
+	InstalledSize int64
 }
 
-func renderRemoveSuccess(name, version string, started time.Time) {
-	fmt.Printf("%s %s removed successfully.\n", paint(name), paint(version))
-	fmt.Printf("Completed in %.2fs\n", time.Since(started).Seconds())
+func printPacmanPackageList(packages []PackageTransactionItem, showSizes bool) {
+	if len(packages) == 0 {
+		fmt.Println("there is nothing to do")
+		return
+	}
+	ordered := append([]PackageTransactionItem(nil), packages...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return strings.ToLower(ordered[i].Package.Name) < strings.ToLower(ordered[j].Package.Name)
+	})
+	fmt.Printf("\n%s", paintTransaction(fmt.Sprintf("Packages (%d)", len(ordered))))
+	var downloadSize, installedSize int64
+	for _, item := range ordered {
+		fmt.Printf(" %s-%s", item.Package.Name, item.Package.Version)
+		downloadSize += item.DownloadSize
+		installedSize += item.InstalledSize
+	}
+	fmt.Print("\n")
+	if showSizes {
+		fmt.Printf("%s    %s\n", paintTransaction("Total Download Size:"), formatPackageSize(downloadSize))
+		fmt.Printf("%s   %s\n", paintTransaction("Total Installed Size:"), formatPackageSize(installedSize))
+	}
+	fmt.Print("\n")
 }
+
+func formatPackageSize(size int64) string {
+	const kib = 1 << 10
+	const mib = 1 << 20
+	switch {
+	case size >= mib:
+		return fmt.Sprintf("%.2f MiB", float64(size)/mib)
+	case size >= kib:
+		return fmt.Sprintf("%.2f KiB", float64(size)/kib)
+	default:
+		return fmt.Sprintf("%d B", size)
+	}
+}
+
+func renderInstallSteps(packages []PackageTransactionItem, rootName string) {
+	ordered := append([]PackageTransactionItem(nil), packages...)
+	rootKey := normalizePackageName(rootName)
+	sort.Slice(ordered, func(i, j int) bool {
+		iRoot := normalizePackageName(ordered[i].Package.Name) == rootKey
+		jRoot := normalizePackageName(ordered[j].Package.Name) == rootKey
+		if iRoot != jRoot {
+			return !iRoot
+		}
+		return strings.ToLower(ordered[i].Package.Name) < strings.ToLower(ordered[j].Package.Name)
+	})
+	for i, pkg := range ordered {
+		fmt.Printf("(%d/%d) %s %s (%s)\n", i+1, len(ordered), paintTransaction("installing"), pkg.Package.Name, pkg.Package.Version)
+	}
+}
+
+func renderRemoveSteps(packages []PackageTransactionItem, rootName string) {
+	ordered := append([]PackageTransactionItem(nil), packages...)
+	rootKey := normalizePackageName(rootName)
+	sort.Slice(ordered, func(i, j int) bool {
+		iRoot := normalizePackageName(ordered[i].Package.Name) == rootKey
+		jRoot := normalizePackageName(ordered[j].Package.Name) == rootKey
+		if iRoot != jRoot {
+			return iRoot
+		}
+		return strings.ToLower(ordered[i].Package.Name) > strings.ToLower(ordered[j].Package.Name)
+	})
+	for i, pkg := range ordered {
+		fmt.Printf("(%d/%d) %s %s (%s)\n", i+1, len(ordered), paintTransaction("removing"), pkg.Package.Name, pkg.Package.Version)
+	}
+}
+
 func renderSimpleSuccess(action, name, version string) {
 	fmt.Printf("NixFlux: %s %s\n", action, paint(name))
 	if version != "" {

@@ -12,7 +12,7 @@ const usage = `usage: nixflux [-h] [--version] <group> <action> [argument]
 commands:
   version
   env install <repo:name==version>
-  env remove <name==version>
+  env remove <name==version|latest>
   env list
   env freeze <name==version>
   env unfreeze <name==version>
@@ -112,7 +112,11 @@ func runCLI(argv []string) int {
 		if _, _, _, err := parseRepoPackageSpec(arg); err != nil {
 			return reportError(err)
 		}
-	case "env remove", "env freeze", "env unfreeze":
+	case "env remove":
+		if _, _, err := parsePackageVersionWithLatest(arg, true); err != nil {
+			return reportError(err)
+		}
+	case "env freeze", "env unfreeze":
 		if _, _, err := parsePackageVersion(arg); err != nil {
 			return reportError(err)
 		}
@@ -170,36 +174,59 @@ func runCLI(argv []string) int {
 	started := time.Now()
 	switch command {
 	case "env install":
-		before := db
 		packageName := packageNameFromSpec(arg)
+		packages := []PackageTransactionItem{}
 		progress := startOperationProgress("Installing " + packageName)
-		installErr := envInstall(paths, arg)
-		progress.finish()
+		if progress == nil {
+			fmt.Println(paintTransaction("resolving dependencies..."))
+		}
+		installErr := envInstallWithPlan(paths, arg, func(resolved []PackageTransactionItem) {
+			packages = resolved
+			if progress != nil {
+				progress.finish()
+				progress = nil
+			}
+			fmt.Println(paintTransaction("looking for conflicting packages..."))
+			printPacmanPackageList(packages, true)
+		})
+		if progress != nil {
+			progress.finish()
+		}
 		if installErr != nil {
 			return reportError(installErr)
 		}
-		after, loadErr := loadDatabase(paths.Database)
-		if loadErr != nil {
-			return reportError(loadErr)
-		}
-		defaultProfile, profileErr := loadDefaultSettings(paths)
-		if profileErr != nil {
-			return reportError(profileErr)
-		}
-		installedVersion := versionFromSpec(arg)
-		if installed, exists := packagesForProfile(after, defaultProfile.ProfileName)[normalizePackageName(packageName)]; exists {
-			installedVersion = installed.Version
-		}
-		renderInstallSuccess(packageName, installedVersion, started, countChangedDependencies(before, after, packageName))
+		renderInstallSteps(packages, packageName)
 	case "env remove":
-		name, version, _ := parsePackageVersion(arg)
+		name, version, _ := parsePackageVersionWithLatest(arg, true)
+		if strings.EqualFold(version, "latest") {
+			defaultProfile, profileErr := loadDefaultSettings(paths)
+			if profileErr != nil {
+				return reportError(profileErr)
+			}
+			if installed, exists := packagesForProfile(db, defaultProfile.ProfileName)[normalizePackageName(name)]; exists {
+				version = installed.Version
+			}
+		}
+		packages := []PackageTransactionItem{}
 		progress := startOperationProgress("Removing " + name)
-		removeErr := envRemove(paths, arg)
-		progress.finish()
+		if progress == nil {
+			fmt.Println(paintTransaction("checking dependencies..."))
+		}
+		removeErr := envRemoveWithPlan(paths, arg, func(resolved []PackageTransactionItem) {
+			packages = resolved
+			if progress != nil {
+				progress.finish()
+				progress = nil
+			}
+			printPacmanPackageList(packages, false)
+		})
+		if progress != nil {
+			progress.finish()
+		}
 		if removeErr != nil {
 			return reportError(removeErr)
 		}
-		renderRemoveSuccess(name, version, started)
+		renderRemoveSteps(packages, name)
 	case "env list":
 		defaultProfile, err := loadDefaultSettings(paths)
 		if err != nil {
@@ -331,23 +358,4 @@ func versionFromSpec(spec string) string {
 // RunCLI executes the NixFlux command-line interface and returns its process exit code.
 func RunCLI(argv []string) int {
 	return runCLI(argv)
-}
-
-func countChangedDependencies(before, after Database, rootName string) int {
-	rootKey := normalizePackageName(rootName)
-	previousArtifacts := map[string]bool{}
-	for artifactID := range before.Artifacts {
-		previousArtifacts[artifactID] = true
-	}
-	for _, pkg := range before.Packages {
-		previousArtifacts[pkg.Dir] = true
-	}
-	count := 0
-	for artifactID, installed := range after.Artifacts {
-		if normalizePackageName(installed.Name) == rootKey || previousArtifacts[artifactID] {
-			continue
-		}
-		count++
-	}
-	return count
 }

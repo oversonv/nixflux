@@ -15,10 +15,11 @@ type packagePlan struct {
 	Resolving          map[string]bool
 	Replace            map[string]bool
 	Indexes            map[string]RepositoryIndex
+	DownloadSizes      map[string]int64
 }
 
 func newPackagePlan() *packagePlan {
-	return &packagePlan{Artifacts: map[string]PackageArtifact{}, Resolved: map[string]InstalledPackage{}, Resolving: map[string]bool{}, Replace: map[string]bool{}, Indexes: map[string]RepositoryIndex{}}
+	return &packagePlan{Artifacts: map[string]PackageArtifact{}, Resolved: map[string]InstalledPackage{}, Resolving: map[string]bool{}, Replace: map[string]bool{}, Indexes: map[string]RepositoryIndex{}, DownloadSizes: map[string]int64{}}
 }
 
 func clonePackagePlan(source *packagePlan) *packagePlan {
@@ -26,6 +27,9 @@ func clonePackagePlan(source *packagePlan) *packagePlan {
 	clone.Indexes = source.Indexes
 	for key, value := range source.Artifacts {
 		clone.Artifacts[key] = value
+	}
+	for key, value := range source.DownloadSizes {
+		clone.DownloadSizes[key] = value
 	}
 	for key, value := range source.Resolved {
 		clone.Resolved[key] = value
@@ -48,6 +52,7 @@ func clonePackagePlan(source *packagePlan) *packagePlan {
 
 func commitResolvedPlan(destination, source *packagePlan) {
 	destination.Artifacts = source.Artifacts
+	destination.DownloadSizes = source.DownloadSizes
 	destination.Resolved = source.Resolved
 	destination.Frozen = source.Frozen
 	destination.ActivateGeneration = source.ActivateGeneration
@@ -146,6 +151,7 @@ func resolvePackage(paths AppPaths, settings Settings, db Database, plan *packag
 				return appError("invalid_package", "DEB Architecture does not match the APT Packages index")
 			}
 			artifact = &resolved
+			plan.DownloadSizes[key] = entry.Size
 			dependencies = append(dependencies, resolved.Manifest.Dependencies...)
 		}
 	}
@@ -243,7 +249,9 @@ func ensureInstalledDependencies(paths AppPaths, settings Settings, db Database,
 		return appError("dependency_cycle", installed.Name)
 	}
 	plan.Resolving[key] = true
-	defer delete(plan.Resolving, key)
+	defer func() {
+		delete(plan.Resolving, key)
+	}()
 	for _, dependency := range installed.Dependencies {
 		if err := resolveDependencyGroup(paths, settings, db, plan, dependency, preferredRepo, allowDowngrade); err != nil {
 			return fmt.Errorf("%s requires %s: %w", installed.Name, dependency, err)
@@ -539,6 +547,10 @@ func systemPackageVersion(name string) (string, bool) {
 }
 
 func envInstall(paths AppPaths, spec string) error {
+	return envInstallWithPlan(paths, spec, nil)
+}
+
+func envInstallWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransactionItem)) error {
 	repo, name, version, err := parseRepoPackageSpec(spec)
 	if err != nil {
 		return err
@@ -599,6 +611,9 @@ func envInstall(paths AppPaths, spec string) error {
 			return err
 		}
 	}
+	if onPlan != nil {
+		onPlan(packagePlanChanges(paths, profileDB.Packages, plan))
+	}
 	newActive := active
 	if active.ProfilePath == settings.ProfilePath {
 		newActive = newSettings
@@ -606,8 +621,66 @@ func envInstall(paths AppPaths, spec string) error {
 	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, false)
 }
 
+func packagePlanChanges(paths AppPaths, current map[string]InstalledPackage, plan *packagePlan) []PackageTransactionItem {
+	changes := make([]PackageTransactionItem, 0)
+	for key, pkg := range plan.Resolved {
+		installed, exists := current[key]
+		if exists && installed.Dir == pkg.Dir && !plan.Replace[key] {
+			continue
+		}
+		item := PackageTransactionItem{Package: pkg, DownloadSize: plan.DownloadSizes[key]}
+		if artifact, ok := plan.Artifacts[key]; ok {
+			item.InstalledSize = artifact.InstalledSize
+		} else if size, err := packageStorePayloadSize(paths, pkg); err == nil {
+			item.InstalledSize = size
+		}
+		changes = append(changes, item)
+	}
+	return changes
+}
+
+func packageClosureChanges(current, resolved map[string]InstalledPackage) []PackageTransactionItem {
+	changes := make([]PackageTransactionItem, 0)
+	for key, installed := range current {
+		retained, exists := resolved[key]
+		if !exists || retained.Dir != installed.Dir {
+			changes = append(changes, PackageTransactionItem{Package: installed})
+		}
+	}
+	return changes
+}
+
+func packageStorePayloadSize(paths AppPaths, pkg InstalledPackage) (int64, error) {
+	root := filepath.Join(paths.Store, pkg.Dir, "payload")
+	var size int64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			if info.Size() > int64(^uint64(0)>>1)-size {
+				return fmt.Errorf("package payload size overflows int64")
+			}
+			size += info.Size()
+		}
+		return nil
+	})
+	return size, err
+}
+
 func envRemove(paths AppPaths, spec string) error {
-	name, version, err := parsePackageVersion(spec)
+	return envRemoveWithPlan(paths, spec, nil)
+}
+
+func envRemoveWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransactionItem)) error {
+	name, version, err := parsePackageVersionWithLatest(spec, true)
 	if err != nil {
 		return err
 	}
@@ -628,9 +701,10 @@ func envRemove(paths AppPaths, spec string) error {
 	}
 	available := packagesForProfile(db, settings.ProfileName)
 	installed, exists := available[normalizePackageName(name)]
-	if !exists || !versionsEqual(installed.Version, version) {
+	if !exists || (!strings.EqualFold(version, "latest") && !versionsEqual(installed.Version, version)) {
 		return appError("package_not_installed", spec)
 	}
+	version = installed.Version
 	newSettings := cloneSettings(settings)
 	removeEnabledPackage(&newSettings, name, version)
 	closure, err := closureFromEnabled(paths, newSettings, available)
@@ -639,6 +713,9 @@ func envRemove(paths AppPaths, spec string) error {
 	}
 	plan := newPackagePlan()
 	plan.Resolved = closure
+	if onPlan != nil {
+		onPlan(packageClosureChanges(available, closure))
+	}
 	newActive := active
 	if active.ProfilePath == settings.ProfilePath {
 		newActive = newSettings

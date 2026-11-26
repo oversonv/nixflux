@@ -36,6 +36,16 @@ NixFlux installs native Debian binary packages (`.deb`) from APT repositories in
 
 ## Quick Start
 
+### Install a prebuilt ARM64 release
+
+Linux ARM64 and Android/Termux ARM64 can install the latest development build without Python or `jq`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/oversonv/nixflux/main/install.sh | sh
+```
+
+The installer uses `curl` or `wget` to download the matching binary. Termux installs to `$PREFIX/bin`; Linux installs to `$HOME/.local/bin`.
+
 ### Linux
 
 ```sh

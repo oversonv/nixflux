@@ -301,14 +301,14 @@ func TestEmbeddedMetadataVersionOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Name != "nixflux" || metadata.Version != "0.1.0" || metadata.Data != "2026-11-25" {
+	if metadata.Name != "nixflux" || metadata.Version != "0.1.0-dev" || metadata.Data != "2026-11-26" {
 		t.Fatalf("unexpected embedded metadata: %#v", metadata)
 	}
 	var output bytes.Buffer
 	if err := renderVersion(&output); err != nil {
 		t.Fatal(err)
 	}
-	want := "name: nixflux\nversion: 0.1.0\nstatus: development\ndata: 2026-11-25\n"
+	want := "name: nixflux\nversion: 0.1.0-dev\nstatus: development\ndata: 2026-11-26\n"
 	if output.String() != want {
 		t.Fatalf("unexpected version output: %s", output.String())
 	}
