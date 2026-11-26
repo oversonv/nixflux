@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -617,8 +618,6 @@ func containsString(values []string, wanted string) bool {
 }
 
 func isApplicationError(err error, code string) bool {
-	if typed, ok := err.(*applicationError); ok {
-		return typed.code == code
-	}
-	return false
+	var typed *applicationError
+	return errors.As(err, &typed) && typed.code == code
 }

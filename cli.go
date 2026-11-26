@@ -25,6 +25,8 @@ commands:
 	profiles list
 	profiles install <name>
 	profiles remove <name>
+	profiles generations <name>
+	profiles rollback <name> <generation-id>
 	profiles update [name]
 
 options:
@@ -34,7 +36,7 @@ options:
 var commandArgumentCounts = map[string]int{
 	"env install": 1, "env remove": 1, "env list": 0, "env freeze": 1, "env unfreeze": 1, "env frozen": 0, "env update": 0,
 	"channel install": 1, "channel remove": 1, "channel list": 0, "channel fetch": 1,
-	"profiles list": 0, "profiles install": 1, "profiles remove": 1, "profiles update": 0,
+	"profiles list": 0, "profiles install": 1, "profiles remove": 1, "profiles generations": 1, "profiles rollback": 2, "profiles update": 0,
 }
 
 func parseArguments(argv []string) ([]string, bool, error) {
@@ -122,11 +124,14 @@ func runCLI(argv []string) int {
 		if !channelNamePattern.MatchString(arg) {
 			return reportError(appError("invalid_config", "invalid channel name"))
 		}
-	case "profiles install", "profiles remove", "profiles update":
+	case "profiles install", "profiles remove", "profiles update", "profiles generations", "profiles rollback":
 		if arg != "" {
 			if _, err := profileFilename(arg); err != nil {
 				return reportError(err)
 			}
+		}
+		if command == "profiles rollback" && !generationIDPattern.MatchString(args[1]) {
+			return reportError(appError("invalid_config", "invalid profile generation ID"))
 		}
 	}
 	home, err := fetchPathHome()
@@ -151,6 +156,12 @@ func runCLI(argv []string) int {
 	}
 	settings, err := loadSettings(paths)
 	if err != nil {
+		return reportError(err)
+	}
+	if err := ensureProfileClosure(paths, &db, settings); err != nil {
+		return reportError(err)
+	}
+	if err := ensureProfileLaunchers(paths, db, settings); err != nil {
 		return reportError(err)
 	}
 	if err := migrateLegacyCommandLinks(paths, db, settings); err != nil {
@@ -198,7 +209,9 @@ func runCLI(argv []string) int {
 		if err != nil {
 			return reportError(err)
 		}
-		ensureProfileClosure(paths, &db, defaultProfile)
+		if err := ensureProfileClosure(paths, &db, defaultProfile); err != nil {
+			return reportError(err)
+		}
 		for _, line := range listInstalled(databaseForProfile(db, defaultProfile)) {
 			fmt.Println(line)
 		}
@@ -222,7 +235,9 @@ func runCLI(argv []string) int {
 		if err != nil {
 			return reportError(err)
 		}
-		ensureProfileClosure(paths, &db, defaultProfile)
+		if err := ensureProfileClosure(paths, &db, defaultProfile); err != nil {
+			return reportError(err)
+		}
 		lines := frozenPackages(databaseForProfile(db, defaultProfile))
 		if len(lines) == 0 {
 			fmt.Println("No frozen packages.")
@@ -282,6 +297,15 @@ func runCLI(argv []string) int {
 			return reportError(err)
 		}
 		fmt.Printf("Profile %s removed.\n", arg)
+	case "profiles generations":
+		if err := renderProfileGenerations(paths, arg); err != nil {
+			return reportError(err)
+		}
+	case "profiles rollback":
+		if err := rollbackProfile(paths, arg, args[1]); err != nil {
+			return reportError(err)
+		}
+		fmt.Printf("Profile %s rolled back to generation %s.\n", arg, args[1])
 	case "profiles update":
 		if err := updateProfile(paths, arg, true); err != nil {
 			return reportError(err)

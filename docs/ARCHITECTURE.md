@@ -24,11 +24,12 @@ Tests remain alongside the root package so they can exercise internal transactio
 
 - the loaded profile's `enabled` list determines which root package entrypoints may be exposed in `PATH`.
 - the profile closure pins each root and transitive dependency to an artifact ID derived from its Store path.
+- each profile's `.generation` pointer selects an immutable manifest under `profiles/<name>/generations/`; the manifest retains prior roots and artifact IDs for offline rollback.
 - the artifact index is shared for deduplication, but resolution only reuses packages in the selected profile closure or read-only system packages.
 - dependency commands are not published unless the dependency is also an explicit root target in the loaded profile.
 - `profiles update [name]` reconciles only the selected profile's enabled targets with repositories and the Store. Without a name it uses `profiles.lock`; with a name it also loads that profile without changing the persistent default.
 
-Package mutations update the target profile, artifact index, profile closure, active-profile marker, and command links through one transaction journal. Removing a root only changes its profile closure; Store objects remain available to other profiles. Garbage collection and historical profile generations are not implemented yet. Startup link reconciliation removes stale NixFlux-owned command links created by older releases, without deleting unrelated commands. On Android, current links live in `$PREFIX/bin`; `$HOME/nix/bin` is retained only as a legacy migration source. The CLI refuses to run on Android when `PREFIX` is missing or not absolute, preventing silent publication into a directory outside Termux's standard `PATH`.
+Package and freeze mutations update the target profile, artifact index, profile closure, immutable generation manifest, generation pointer, and command links through one transaction journal. `profiles generations` lists retained manifests; `profiles rollback` verifies Store artifacts and restores one generation without network access. Removing a profile atomically removes its spec, generation manifests, database references, default/current markers, and owned command links. Store objects remain available to other profiles. Garbage collection is not implemented. Startup link reconciliation removes stale NixFlux-owned command links created by older releases, without deleting unrelated commands. On Android, current links live in `$PREFIX/bin`; `$HOME/nix/bin` is retained only as a legacy migration source. The CLI refuses to run on Android when `PREFIX` is missing or not absolute, preventing silent publication into a directory outside Termux's standard `PATH`.
 
 ## Dependency direction
 

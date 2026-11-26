@@ -22,10 +22,11 @@ type Channel struct {
 }
 
 type Settings struct {
-	Channels    []Channel `json:"channels"`
-	Enabled     []string  `json:"enabled"`
-	ProfileName string    `json:"-"`
-	ProfilePath string    `json:"-"`
+	Channels     []Channel `json:"channels"`
+	Enabled      []string  `json:"enabled"`
+	ProfileName  string    `json:"-"`
+	ProfilePath  string    `json:"-"`
+	GenerationID string    `json:"-"`
 }
 
 func defaultSettings() Settings {
@@ -305,6 +306,10 @@ func loadProfileSettings(paths AppPaths, filename string) (Settings, error) {
 		return Settings{}, appError("invalid_config", filename+": "+err.Error())
 	}
 	settings := Settings{Channels: channels, Enabled: enabled, ProfileName: filename, ProfilePath: path}
+	settings.GenerationID, err = readCurrentGeneration(paths, filename)
+	if err != nil {
+		return Settings{}, err
+	}
 	if err := normalizeSettings(&settings); err != nil {
 		return Settings{}, err
 	}
@@ -409,7 +414,7 @@ func listProfileFilenames(paths AppPaths) ([]string, error) {
 		}
 		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() {
 			if _, err := profilePath(paths, entry.Name()); err == nil {
-			filenames = append(filenames, entry.Name())
+				filenames = append(filenames, entry.Name())
 			}
 		}
 	}

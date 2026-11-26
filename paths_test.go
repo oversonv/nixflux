@@ -52,7 +52,9 @@ func TestLegacyNixBinLinksMigrateIntoTermuxPathAndRunByName(t *testing.T) {
 		Name: "neofetch", Version: "1.0-1", Dir: storeDir,
 		Entrypoints: []string{"payload/bin/neofetch"},
 	}
-	settings := Settings{Channels: []Channel{}, Enabled: []string{"neofetch==1.0-1"}}
+	db.Artifacts[storeDir] = db.Packages["neofetch"]
+	db.ProfileClosures["default.toml"] = map[string]string{"neofetch": storeDir}
+	settings := Settings{Channels: []Channel{}, Enabled: []string{"neofetch==1.0-1"}, ProfileName: "default.toml"}
 	if err := migrateLegacyCommandLinks(paths, db, settings); err != nil {
 		t.Fatalf("legacy command link migration failed: %v", err)
 	}
@@ -105,7 +107,9 @@ func TestLegacyLinkMigrationDoesNotOverwriteExistingTermuxCommand(t *testing.T) 
 	}
 	db := emptyDatabase()
 	db.Packages["neofetch"] = InstalledPackage{Name: "neofetch", Version: "1.0-1", Dir: storeDir, Entrypoints: []string{"payload/bin/neofetch"}}
-	settings := Settings{Channels: []Channel{}, Enabled: []string{"neofetch==1.0-1"}}
+	db.Artifacts[storeDir] = db.Packages["neofetch"]
+	db.ProfileClosures["default.toml"] = map[string]string{"neofetch": storeDir}
+	settings := Settings{Channels: []Channel{}, Enabled: []string{"neofetch==1.0-1"}, ProfileName: "default.toml"}
 	if err := migrateLegacyCommandLinks(paths, db, settings); err == nil {
 		t.Fatal("migration must reject an existing non-symlink command instead of overwriting it")
 	}
@@ -311,7 +315,9 @@ func TestLegacyMigrationReplacesStaleNixFluxLinkInTermuxBin(t *testing.T) {
 		Name: "neofetch", Version: "2.0-1", Dir: "new-neofetch",
 		Entrypoints: []string{"payload/bin/neofetch"},
 	}
-	settings := Settings{Channels: []Channel{}, Enabled: []string{"neofetch==2.0-1"}}
+	db.Artifacts["new-neofetch"] = db.Packages["neofetch"]
+	db.ProfileClosures["default.toml"] = map[string]string{"neofetch": "new-neofetch"}
+	settings := Settings{Channels: []Channel{}, Enabled: []string{"neofetch==2.0-1"}, ProfileName: "default.toml"}
 	if err := migrateLegacyCommandLinks(paths, db, settings); err != nil {
 		t.Fatalf("legacy link migration failed: %v", err)
 	}

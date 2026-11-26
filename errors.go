@@ -1,6 +1,7 @@
 package nixflux
 
 import (
+	"errors"
 	"fmt"
 	"os"
 )
@@ -8,6 +9,7 @@ import (
 type applicationError struct {
 	code   string
 	detail string
+	cause  error
 }
 
 var errorMessages = map[string]string{
@@ -16,11 +18,29 @@ var errorMessages = map[string]string{
 	"channel_not_found": "Channel was not found in channels.json.", "channel_already_exists": "Channel with this name already exists.", "profile_not_found": "Profile was not found.", "profile_exists": "A profile with this name already exists.", "package_not_installed": "Matching package in store was not found.", "package_not_frozen": "Package is not frozen.", "version_not_found": "Requested version was not found in repository.",
 	"timeout": "The site has timed out.", "request_error": "Network error occurred while connecting to repository.", "not_found": "Requested resource was not found in repository.", "http_error": "HTTP error occurred while fetching repository data.", "invalid_json": "Failed to parse JSON response.", "io_error": "Failed to read or write files or directories.",
 	"invalid_config": "NixFlux configuration or profile is invalid.", "invalid_database": "Installed package database is invalid or unsupported.", "invalid_repository": "Repository index is invalid.", "invalid_package": "Package archive is invalid.", "checksum_mismatch": "Package integrity verification failed.", "binary_conflict": "A binary with this name is already owned by another file or package.", "package_frozen": "Package is frozen and cannot change versions.", "downgrade_requires_set_update": "Downgrade is only allowed through 'profiles update'.", "dependency_not_found": "A required dependency was not found.", "dependency_conflict": "Installed packages have conflicting dependency requirements.", "dependency_cycle": "A circular dependency was detected.", "package_required": "Package is required by another installed package.", "store_corrupt": "Installed package data failed an integrity check.",
-	"transaction_failed": "Package operation failed and its transaction was rolled back.",
+	"transaction_failed": "Package operation failed and its transaction was rolled back.", "internal_error": "An unexpected internal error occurred.",
 }
 var usageErrorCodes = map[string]bool{"missing_args": true, "too_many_args": true, "unknown_option": true, "unknown_command": true, "invalid_env_install_format": true, "invalid_env_remove_format": true, "invalid_package_name": true, "invalid_version": true}
 
 func appError(code, detail string) error { return &applicationError{code: code, detail: detail} }
+
+// wrapAppError adds an operation boundary while retaining the underlying
+// cause for callers that need to classify or inspect it.
+func wrapAppError(code, operation string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	detail := operation
+	if detail == "" {
+		detail = cause.Error()
+	} else {
+		detail += ": " + cause.Error()
+	}
+	return &applicationError{code: code, detail: detail, cause: cause}
+}
+
+func (e *applicationError) Unwrap() error { return e.cause }
+
 func (e *applicationError) Error() string {
 	message, ok := errorMessages[e.code]
 	if !ok {
@@ -32,13 +52,16 @@ func (e *applicationError) Error() string {
 	return message
 }
 func reportError(err error) int {
-	if appErr, ok := err.(*applicationError); ok {
-		fmt.Fprintln(os.Stderr, appErr.Error())
-		if usageErrorCodes[appErr.code] {
-			return 2
-		}
-		return 1
+	if err == nil {
+		return 0
 	}
-	fmt.Fprintln(os.Stderr, err.Error())
+	var appErr *applicationError
+	if !errors.As(err, &appErr) {
+		appErr = &applicationError{code: "internal_error", detail: err.Error()}
+	}
+	fmt.Fprintln(os.Stderr, appErr.Error())
+	if usageErrorCodes[appErr.code] {
+		return 2
+	}
 	return 1
 }

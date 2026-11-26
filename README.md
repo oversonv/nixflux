@@ -89,6 +89,7 @@ A profile is an independent working environment with its own package list. Paylo
 profiles.lock  ──► persistent default profile
 .current       ──► currently loaded profile
 profiles/*.toml ─► enabled packages for each profile
+profiles/<name>/.generation ─► active immutable generation
 ```
 
 | File / marker | Purpose |
@@ -96,6 +97,8 @@ profiles/*.toml ─► enabled packages for each profile
 | `profiles.lock` | Persistent default profile used by commands without a profile name |
 | `.current` | Profile whose commands are currently published to `PATH` |
 | `<name>.toml` | Independent enabled package list |
+| `<name>/.generation` | Active generation ID for the profile |
+| `<name>/generations/*.json` | Immutable roots and Store closure snapshots |
 
 ### Example profile
 
@@ -111,10 +114,14 @@ nixflux profiles install work       # create an empty profile without installing
 nixflux profiles update work        # update and load work
 nixflux profiles update             # update the persistent default from profiles.lock
 nixflux profiles list               # mark the default and list profiles
-nixflux profiles remove work        # remove only the profile TOML
+nixflux profiles generations work   # list retained profile generations
+nixflux profiles rollback work <id>  # restore a generation without network access
+nixflux profiles remove work        # atomically remove profile state
 ```
 
 `profiles update work` does not modify `profiles.lock`: a named profile update affects only the loaded environment.
+
+Each new profile starts with an empty generation. Successful package, freeze, and profile updates record immutable manifests under `profiles/<name>/generations/`. Rollback verifies every referenced Store artifact before changing the profile. Generations are retained until the profile is removed; NixFlux does not prune them automatically.
 
 ## Configuration
 
@@ -133,7 +140,10 @@ $HOME/nix/
 └── profiles/
     ├── profiles.lock       # Persistent default profile
     ├── .current            # Currently loaded profile
-    └── <name>.toml         # Profile enabled packages
+    ├── <name>.toml         # Profile enabled packages
+    └── <name>/
+        ├── .generation     # Current generation ID
+        └── generations/    # Immutable profile state manifests
 ```
 
 | Source | Role |
@@ -241,6 +251,8 @@ nixflux profiles list
 nixflux profiles install work
 nixflux profiles update work
 nixflux profiles update
+nixflux profiles generations work
+nixflux profiles rollback work <generation-id>
 nixflux profiles remove work
 nixflux env update
 ```
@@ -249,4 +261,4 @@ An exact version is required for remove, freeze, and unfreeze. A normal install 
 
 ## Atomicity and Recovery
 
-Install and remove operations stage package contents and write a transaction journal before changing Store directories, entrypoint links, the package database, or a profile. The journal preserves prior profile and loaded-profile state, allowing an interrupted operation to restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.
+Install and remove operations stage package contents and write a transaction journal before changing Store directories, entrypoint links, the package database, profile files, or generation pointers. The journal preserves prior profile and loaded-profile state, allowing an interrupted operation to restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.

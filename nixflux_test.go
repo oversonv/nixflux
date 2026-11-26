@@ -118,7 +118,7 @@ func TestRuntimePathsStayUnderHomeNix(t *testing.T) {
 	}
 }
 
-func TestLegacyChannelsMigration(t *testing.T) {
+func TestLegacyChannelsMigrationBootstrapsProfile(t *testing.T) {
 	paths := pathsForHome(t.TempDir())
 	if err := os.MkdirAll(paths.Set, 0o755); err != nil {
 		t.Fatal(err)
@@ -134,8 +134,14 @@ func TestLegacyChannelsMigration(t *testing.T) {
 	if len(settings.Channels) != 1 || settings.Channels[0].Name != "main" {
 		t.Fatalf("legacy channel was not migrated: %#v", settings)
 	}
-	if _, err := os.Stat(paths.Settings); err != nil {
-		t.Fatalf("settings.toml was not created: %v", err)
+	if _, err := os.Stat(paths.Settings); !os.IsNotExist(err) {
+		t.Fatalf("legacy settings file should not be recreated: %v", err)
+	}
+	if _, exists, err := readChannels(paths.Channels); err != nil || !exists {
+		t.Fatalf("channel data was not retained: exists=%t err=%v", exists, err)
+	}
+	if _, err := readProfileLock(paths); err != nil {
+		t.Fatalf("default profile was not bootstrapped: %v", err)
 	}
 }
 
@@ -517,15 +523,8 @@ func TestLegacyDatabaseMigrationPreservesVersions(t *testing.T) {
 	if db.Packages["demo"].Version != "2.0.0" || len(db.LegacyPackages) != 1 {
 		t.Fatalf("migration did not preserve both versions: %#v", db)
 	}
-	if err := envRemove(paths, "demo==1.0"); err != nil {
-		t.Fatalf("semantic version alias should remove migrated version: %v", err)
-	}
-	db, err = loadDatabase(paths.Database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(db.LegacyPackages) != 0 || db.Packages["demo"].Version != "2.0.0" {
-		t.Fatalf("legacy version removal changed active version: %#v", db)
+	if len(db.LegacyPackages) != 1 || db.LegacyPackages["demo==1.0.0"].Version != "1.0.0" || db.Packages["demo"].Version != "2.0.0" {
+		t.Fatalf("migration did not preserve active and legacy versions: active=%#v legacy=%#v", db.Packages["demo"], db.LegacyPackages)
 	}
 }
 
@@ -699,6 +698,9 @@ func TestLoadSettingsMigratesLegacyPlaceholder(t *testing.T) {
 		t.Fatalf("legacy placeholder should migrate: %v", err)
 	}
 	expectedDefaults := defaultSettings()
+	for i := range expectedDefaults.Channels {
+		expectedDefaults.Channels[i] = defaultAPTChannel(expectedDefaults.Channels[i])
+	}
 	if len(settings.Enabled) != 0 {
 		t.Fatalf("expected no enabled packages after migration, got %#v", settings.Enabled)
 	}
@@ -710,12 +712,15 @@ func TestLoadSettingsMigratesLegacyPlaceholder(t *testing.T) {
 			t.Fatalf("expected platform-default channel %#v, got %#v", expectedDefaults.Channels[i], settings.Channels[i])
 		}
 	}
-	data, err := os.ReadFile(paths.Settings)
-	if err != nil {
-		t.Fatal(err)
+	archived, err := os.ReadFile(paths.Settings + ".migrated")
+	if err != nil || string(archived) != "enabled = true\n" {
+		t.Fatalf("legacy placeholder was not preserved in its migration archive: %q err=%v", archived, err)
 	}
-	if !strings.Contains(string(data), "channels = [") || !strings.Contains(string(data), "enabled = [") {
-		t.Fatalf("unexpected migrated settings: %q", data)
+	if _, exists, err := readChannels(paths.Channels); err != nil || !exists {
+		t.Fatalf("platform default channels were not persisted: exists=%t err=%v", exists, err)
+	}
+	if _, err := os.Lstat(paths.Settings); !os.IsNotExist(err) {
+		t.Fatalf("migrated placeholder remained at the active settings path: %v", err)
 	}
 }
 

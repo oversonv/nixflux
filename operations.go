@@ -8,11 +8,13 @@ import (
 )
 
 type packagePlan struct {
-	Artifacts map[string]PackageArtifact
-	Resolved  map[string]InstalledPackage
-	Resolving map[string]bool
-	Replace   map[string]bool
-	Indexes   map[string]RepositoryIndex
+	Artifacts          map[string]PackageArtifact
+	Resolved           map[string]InstalledPackage
+	Frozen             map[string]string
+	ActivateGeneration string
+	Resolving          map[string]bool
+	Replace            map[string]bool
+	Indexes            map[string]RepositoryIndex
 }
 
 func newPackagePlan() *packagePlan {
@@ -28,6 +30,13 @@ func clonePackagePlan(source *packagePlan) *packagePlan {
 	for key, value := range source.Resolved {
 		clone.Resolved[key] = value
 	}
+	if source.Frozen != nil {
+		clone.Frozen = map[string]string{}
+		for key, value := range source.Frozen {
+			clone.Frozen[key] = value
+		}
+	}
+	clone.ActivateGeneration = source.ActivateGeneration
 	for key, value := range source.Resolving {
 		clone.Resolving[key] = value
 	}
@@ -40,6 +49,8 @@ func clonePackagePlan(source *packagePlan) *packagePlan {
 func commitResolvedPlan(destination, source *packagePlan) {
 	destination.Artifacts = source.Artifacts
 	destination.Resolved = source.Resolved
+	destination.Frozen = source.Frozen
+	destination.ActivateGeneration = source.ActivateGeneration
 	destination.Resolving = source.Resolving
 	destination.Replace = source.Replace
 	destination.Indexes = source.Indexes
@@ -114,7 +125,7 @@ func resolvePackage(paths AppPaths, settings Settings, db Database, plan *packag
 			if verifyStoredPackage(paths, candidate) == nil {
 				manifestRaw, readErr := os.ReadFile(filepath.Join(paths.Store, candidate.Dir, "package.toml"))
 				manifest, parseErr := parsePackageTOML(manifestRaw)
-				if readErr != nil || parseErr != nil || entry.Architecture != "" && !strings.EqualFold(entry.Architecture, manifest.Architecture) {
+				if readErr != nil || parseErr != nil || entry.Architecture != "" && !strings.EqualFold(goArchitectureForDebian(entry.Architecture), manifest.Architecture) {
 					continue
 				}
 				copy := candidate
@@ -130,7 +141,7 @@ func resolvePackage(paths AppPaths, settings Settings, db Database, plan *packag
 				delete(plan.Resolving, key)
 				return downloadErr
 			}
-			if entry.Architecture != "" && !strings.EqualFold(entry.Architecture, resolved.Manifest.Architecture) {
+			if entry.Architecture != "" && !strings.EqualFold(goArchitectureForDebian(entry.Architecture), resolved.Manifest.Architecture) {
 				delete(plan.Resolving, key)
 				return appError("invalid_package", "DEB Architecture does not match the APT Packages index")
 			}
@@ -187,6 +198,10 @@ func resolveDependencyGroup(paths AppPaths, settings Settings, db Database, plan
 			if satisfied, checkErr := versionSatisfies(installed.Version, constraint); checkErr == nil && satisfied && verifyStoredPackage(paths, installed) == nil {
 				candidatePlan := clonePackagePlan(plan)
 				if closureErr := ensureInstalledDependencies(paths, settings, db, candidatePlan, installed, installed.Source, allowDowngrade); closureErr == nil {
+					// Keep reused dependencies in the resulting profile closure. Merely
+					// checking an installed package here made re-installing an existing
+					// root silently drop its transitive dependencies from the closure.
+					candidatePlan.Resolved[key] = installed
 					commitResolvedPlan(plan, candidatePlan)
 					return nil
 				} else {
@@ -258,16 +273,41 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 			}
 		}
 	}
-	if len(plan.Artifacts) == 0 && !profileChanged && !closureChanged && !loadedChanged && !activeChanged {
+	frozenChanged := false
+	if plan.Frozen != nil && newSettings.ProfileName != "" {
+		currentFrozen := db.ProfileFrozen[newSettings.ProfileName]
+		if len(currentFrozen) != len(plan.Frozen) {
+			frozenChanged = true
+		} else {
+			for name, version := range plan.Frozen {
+				if !versionsEqual(currentFrozen[normalizePackageName(name)], version) {
+					frozenChanged = true
+					break
+				}
+			}
+		}
+	}
+	activeGeneration := ""
+	if newSettings.ProfileName != "" {
+		var generationErr error
+		activeGeneration, generationErr = readCurrentGeneration(paths, newSettings.ProfileName)
+		if generationErr != nil {
+			return generationErr
+		}
+	}
+	if plan.ActivateGeneration != "" && plan.ActivateGeneration != activeGeneration {
+		closureChanged = true
+	}
+	if len(plan.Artifacts) == 0 && !profileChanged && !closureChanged && !frozenChanged && !loadedChanged && !activeChanged {
 		return nil
 	}
-	if err := os.MkdirAll(paths.Store, 0o755); err != nil {
+	if err := ensureDirectory(paths.Store, 0o755); err != nil {
 		return appError("io_error", err.Error())
 	}
-	if err := os.MkdirAll(paths.Bin, 0o755); err != nil {
+	if err := ensureDirectory(paths.Bin, 0o755); err != nil {
 		return appError("io_error", err.Error())
 	}
-	if err := os.MkdirAll(paths.Staging, 0o755); err != nil {
+	if err := ensureDirectory(paths.Staging, 0o755); err != nil {
 		return appError("io_error", err.Error())
 	}
 	stageRoot, err := os.MkdirTemp(paths.Staging, "txn-")
@@ -315,12 +355,58 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 	}
 	if plan.Resolved != nil && newSettings.ProfileName != "" {
 		setProfileClosure(&newDB, newSettings.ProfileName, plan.Resolved)
+		if plan.Frozen != nil {
+			newDB.ProfileFrozen[newSettings.ProfileName] = map[string]string{}
+			for name, version := range plan.Frozen {
+				newDB.ProfileFrozen[newSettings.ProfileName][normalizePackageName(name)] = version
+			}
+		}
 	}
 	profileDB := Database{Packages: packagesForProfile(newDB, newSettings.ProfileName)}
 	if err := validateInstalledDependencies(profileDB); err != nil {
 		_ = os.RemoveAll(stageRoot)
 		return err
 	}
+	fileChanges := []transactionFileChange{}
+	if plan.ActivateGeneration != "" {
+		newSettings.GenerationID = plan.ActivateGeneration
+		if newActive.ProfilePath == newSettings.ProfilePath {
+			newActive.GenerationID = plan.ActivateGeneration
+		}
+		pointerChange, changeErr := generationPointerChange(paths, newSettings.ProfileName, plan.ActivateGeneration)
+		if changeErr != nil {
+			_ = os.RemoveAll(stageRoot)
+			return changeErr
+		}
+		fileChanges = append(fileChanges, pointerChange)
+	} else if newSettings.ProfileName != "" && (profileChanged || closureChanged || frozenChanged) {
+		generation, generationErr := newProfileGeneration(newSettings.ProfileName, newSettings, newDB)
+		if generationErr != nil {
+			_ = os.RemoveAll(stageRoot)
+			return generationErr
+		}
+		newSettings.GenerationID = generation.ID
+		if newActive.ProfilePath == newSettings.ProfilePath {
+			newActive.GenerationID = generation.ID
+		}
+		manifestChange, changeErr := generationManifestChange(paths, generation)
+		if changeErr != nil {
+			_ = os.RemoveAll(stageRoot)
+			return changeErr
+		}
+		pointerChange, changeErr := generationPointerChange(paths, newSettings.ProfileName, generation.ID)
+		if changeErr != nil {
+			_ = os.RemoveAll(stageRoot)
+			return changeErr
+		}
+		fileChanges = append(fileChanges, manifestChange, pointerChange)
+	}
+	launcherChanges, launcherErr := profileLauncherChanges(paths, newDB, newSettings)
+	if launcherErr != nil {
+		_ = os.RemoveAll(stageRoot)
+		return launcherErr
+	}
+	fileChanges = append(fileChanges, launcherChanges...)
 	links, err := buildLinkChanges(paths, oldDB, newDB, oldActive, newActive)
 	if err != nil {
 		_ = os.RemoveAll(stageRoot)
@@ -331,7 +417,7 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 		_ = os.RemoveAll(stageRoot)
 		return appError("io_error", err.Error())
 	}
-	journal := transactionJournal{StageRoot: stageRoot, DatabaseExisted: exists, DatabaseBackup: backup, Moves: moves, Links: links}
+	journal := transactionJournal{StageRoot: stageRoot, DatabaseExisted: exists, DatabaseBackup: backup, Moves: moves, Links: links, Files: fileChanges}
 	if profileChanged {
 		profileExisted, profileBackup, profileErr := databaseBackup(newSettings.ProfilePath)
 		if profileErr != nil {
@@ -473,7 +559,9 @@ func envInstall(paths AppPaths, spec string) error {
 	if err != nil {
 		return err
 	}
-	ensureProfileClosure(paths, &db, settings)
+	if err := ensureProfileClosure(paths, &db, settings); err != nil {
+		return err
+	}
 	profileDB := databaseForProfile(db, settings)
 	plan := newPackagePlan()
 	if err := resolvePackage(paths, settings, profileDB, plan, repo, name, version, false); err != nil {
@@ -535,7 +623,9 @@ func envRemove(paths AppPaths, spec string) error {
 	if err != nil {
 		return err
 	}
-	ensureProfileClosure(paths, &db, settings)
+	if err := ensureProfileClosure(paths, &db, settings); err != nil {
+		return err
+	}
 	available := packagesForProfile(db, settings.ProfileName)
 	installed, exists := available[normalizePackageName(name)]
 	if !exists || !versionsEqual(installed.Version, version) {
@@ -633,7 +723,9 @@ func setFreeze(paths AppPaths, spec string, frozen bool) error {
 	if err != nil {
 		return err
 	}
-	ensureProfileClosure(paths, &db, settings)
+	if err := ensureProfileClosure(paths, &db, settings); err != nil {
+		return err
+	}
 	key := normalizePackageName(name)
 	p, ok := packagesForProfile(db, settings.ProfileName)[key]
 	if !ok || !versionsEqual(p.Version, version) {
@@ -646,15 +738,22 @@ func setFreeze(paths AppPaths, spec string, frozen bool) error {
 		}
 		return appError("package_not_frozen", spec)
 	}
-	if db.ProfileFrozen[settings.ProfileName] == nil {
-		db.ProfileFrozen[settings.ProfileName] = map[string]string{}
+	active, err := loadSettings(paths)
+	if err != nil {
+		return err
+	}
+	plan := newPackagePlan()
+	plan.Resolved = packagesForProfile(db, settings.ProfileName)
+	plan.Frozen = map[string]string{}
+	for packageName, packageVersion := range db.ProfileFrozen[settings.ProfileName] {
+		plan.Frozen[packageName] = packageVersion
 	}
 	if frozen {
-		db.ProfileFrozen[settings.ProfileName][key] = version
+		plan.Frozen[key] = version
 	} else {
-		delete(db.ProfileFrozen[settings.ProfileName], key)
+		delete(plan.Frozen, key)
 	}
-	return saveDatabase(paths.Database, db)
+	return commitPackagePlan(paths, db, plan, settings, settings, active, active, false)
 }
 
 func setUpdate(paths AppPaths) error {
@@ -682,7 +781,6 @@ func updateProfile(paths AppPaths, name string, makeCurrent bool) error {
 	if err != nil {
 		return err
 	}
-	ensureProfileClosure(paths, &db, settings)
 	profileDB := databaseForProfile(db, settings)
 	plan := newPackagePlan()
 	for _, spec := range settings.Enabled {
@@ -717,10 +815,11 @@ func updateProfile(paths AppPaths, name string, makeCurrent bool) error {
 
 func cloneSettings(settings Settings) Settings {
 	clone := Settings{
-		Channels:    append([]Channel(nil), settings.Channels...),
-		Enabled:     append([]string(nil), settings.Enabled...),
-		ProfileName: settings.ProfileName,
-		ProfilePath: settings.ProfilePath,
+		Channels:     append([]Channel(nil), settings.Channels...),
+		Enabled:      append([]string(nil), settings.Enabled...),
+		ProfileName:  settings.ProfileName,
+		ProfilePath:  settings.ProfilePath,
+		GenerationID: settings.GenerationID,
 	}
 	return clone
 }

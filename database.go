@@ -216,82 +216,135 @@ func packagesForProfile(db Database, profile string) map[string]InstalledPackage
 	return packages
 }
 
-func ensureProfileClosure(paths AppPaths, db *Database, settings Settings) {
+func ensureProfileClosure(paths AppPaths, db *Database, settings Settings) error {
 	if db == nil || settings.ProfileName == "" {
-		return
+		return appError("invalid_database", "profile identity is missing while validating its package closure")
 	}
-	if closure, exists := db.ProfileClosures[settings.ProfileName]; exists {
-		valid := true
-		for name, artifactID := range closure {
-			pkg, artifactExists := db.Artifacts[artifactID]
-			if !artifactExists || normalizePackageName(pkg.Name) != normalizePackageName(name) || verifyStoredPackage(paths, pkg) != nil {
-				valid = false
-				break
-			}
+	if settings.GenerationID != "" {
+		generation, err := readProfileGeneration(paths, settings.ProfileName, settings.GenerationID)
+		if err != nil {
+			return err
 		}
-		if valid {
-			return
+		if !sameStrings(generation.Enabled, settings.Enabled) {
+			return appError("invalid_database", "profile roots do not match the active generation")
 		}
-		delete(db.ProfileClosures, settings.ProfileName)
+		if !sameArtifactReferences(generation.Closure, db.ProfileClosures[settings.ProfileName]) {
+			return appError("invalid_database", "profile closure does not match the active generation")
+		}
+		if !sameArtifactReferences(generation.Frozen, db.ProfileFrozen[settings.ProfileName]) {
+			return appError("invalid_database", "profile freeze state does not match the active generation")
+		}
 	}
-	closure := map[string]string{}
-	if db.ProfileFrozen[settings.ProfileName] == nil {
-		db.ProfileFrozen[settings.ProfileName] = map[string]string{}
+	closure, exists := db.ProfileClosures[settings.ProfileName]
+	if !exists {
+		if len(settings.Enabled) == 0 {
+			return nil
+		}
+		return appError("invalid_database", "profile package closure is missing; run profiles update to rebuild it")
 	}
-	visiting := map[string]bool{}
-	var addPackage func(InstalledPackage)
-	addPackage = func(pkg InstalledPackage) {
-		key := normalizePackageName(pkg.Name)
-		if key == "" || visiting[key] || verifyStoredPackage(paths, pkg) != nil {
-			return
+
+	packages := make(map[string]InstalledPackage, len(closure))
+	for name, artifactID := range closure {
+		key := normalizePackageName(name)
+		pkg, found := db.Artifacts[artifactID]
+		if !found || artifactID != pkg.Dir || key == "" || key != normalizePackageName(pkg.Name) {
+			return appError("invalid_database", fmt.Sprintf("profile %s has an invalid artifact reference for %s", settings.ProfileName, name))
+		}
+		if err := verifyStoredPackage(paths, pkg); err != nil {
+			return wrapAppError("store_corrupt", "profile "+settings.ProfileName+" artifact "+name, err)
+		}
+		packages[key] = pkg
+	}
+
+	for _, spec := range settings.Enabled {
+		name, version, err := parsePackageVersion(spec)
+		if err != nil {
+			return wrapAppError("invalid_config", "invalid enabled package in profile "+settings.ProfileName, err)
+		}
+		pkg, found := packages[normalizePackageName(name)]
+		if !found || !versionsEqual(pkg.Version, version) {
+			return appError("invalid_database", "profile closure does not contain enabled root "+spec)
+		}
+	}
+	for name, version := range db.ProfileFrozen[settings.ProfileName] {
+		pkg, found := packages[normalizePackageName(name)]
+		if !found || !versionsEqual(pkg.Version, version) {
+			return appError("invalid_database", "profile freeze state references an absent or different package: "+name)
+		}
+	}
+
+	reachable := make(map[string]bool, len(packages))
+	visiting := make(map[string]bool, len(packages))
+	var visit func(string) error
+	visit = func(key string) error {
+		if reachable[key] {
+			return nil
+		}
+		if visiting[key] {
+			return appError("dependency_cycle", key)
+		}
+		pkg, found := packages[key]
+		if !found {
+			return appError("invalid_database", "profile dependency is absent from its closure: "+key)
 		}
 		visiting[key] = true
-		artifactID := pkg.Dir
-		closure[key] = artifactID
-		db.Artifacts[artifactID] = pkg
-		if pkg.Frozen {
-			db.ProfileFrozen[settings.ProfileName][key] = pkg.Version
-		}
 		for _, dependency := range pkg.Dependencies {
 			alternatives, err := parseDependencyGroup(dependency)
 			if err != nil {
-				continue
+				return wrapAppError("invalid_database", "invalid dependency in stored package "+pkg.Name, err)
 			}
+			satisfied := false
+			var selectedKey string
 			for _, alternative := range alternatives {
 				name, constraint := alternative[0], alternative[1]
-				if version, ok := systemPackageVersion(name); ok {
-					if satisfied, _ := versionSatisfies(version, constraint); satisfied {
+				if candidate, ok := packages[normalizePackageName(name)]; ok {
+					if matches, versionErr := versionSatisfies(candidate.Version, constraint); versionErr == nil && matches {
+						satisfied, selectedKey = true, normalizePackageName(name)
 						break
 					}
 				}
-				for _, candidate := range legacyPackageCandidates(*db, name) {
-					if satisfied, _ := versionSatisfies(candidate.Version, constraint); satisfied && verifyStoredPackage(paths, candidate) == nil {
-						addPackage(candidate)
-						if _, added := closure[normalizePackageName(candidate.Name)]; added {
-							break
-						}
+				if version, ok := systemPackageVersion(name); ok {
+					if matches, versionErr := versionSatisfies(version, constraint); versionErr == nil && matches {
+						satisfied = true
+						break
 					}
 				}
-				if _, added := closure[normalizePackageName(name)]; added {
-					break
+			}
+			if !satisfied {
+				return appError("invalid_database", fmt.Sprintf("profile closure does not satisfy %s required by %s", dependency, pkg.Name))
+			}
+			if selectedKey != "" {
+				if err := visit(selectedKey); err != nil {
+					return err
 				}
 			}
 		}
 		delete(visiting, key)
+		reachable[key] = true
+		return nil
 	}
 	for _, spec := range settings.Enabled {
-		name, version, err := parsePackageVersion(spec)
-		if err != nil {
-			continue
-		}
-		for _, candidate := range legacyPackageCandidates(*db, name) {
-			if versionsEqual(candidate.Version, version) {
-				addPackage(candidate)
-				break
-			}
+		name, _, _ := parsePackageVersion(spec)
+		if err := visit(normalizePackageName(name)); err != nil {
+			return err
 		}
 	}
-	db.ProfileClosures[settings.ProfileName] = closure
+	if len(reachable) != len(packages) {
+		return appError("invalid_database", "profile closure contains artifacts that are not reachable from enabled roots")
+	}
+	return nil
+}
+
+func sameArtifactReferences(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for name, id := range a {
+		if b[name] != id {
+			return false
+		}
+	}
+	return true
 }
 
 func legacyPackageCandidates(db Database, name string) []InstalledPackage {
