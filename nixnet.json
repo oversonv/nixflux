@@ -1,6 +1,6 @@
 {
   "name": "nixnet",
-  "version": "0.2.0-dev",
-  "status": "development",
+  "version": "1.0.0-beta",
+  "status": "beta",
   "data": "2026-11-27"
 }

@@ -16,6 +16,7 @@ type packagePlan struct {
 	Replace            map[string]bool
 	Indexes            map[string]RepositoryIndex
 	DownloadSizes      map[string]int64
+	RemoveArtifacts    []InstalledPackage
 }
 
 func newPackagePlan() *packagePlan {
@@ -25,6 +26,7 @@ func newPackagePlan() *packagePlan {
 func clonePackagePlan(source *packagePlan) *packagePlan {
 	clone := newPackagePlan()
 	clone.Indexes = source.Indexes
+	clone.RemoveArtifacts = append([]InstalledPackage(nil), source.RemoveArtifacts...)
 	for key, value := range source.Artifacts {
 		clone.Artifacts[key] = value
 	}
@@ -261,6 +263,9 @@ func ensureInstalledDependencies(paths AppPaths, settings Settings, db Database,
 }
 
 func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettings, newSettings, oldActive, newActive Settings, switchLoaded bool) error {
+	if err := currentCLIContext().Err(); err != nil {
+		return err
+	}
 	if err := normalizeSettings(&newSettings); err != nil {
 		return err
 	}
@@ -370,12 +375,46 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 			}
 		}
 	}
+	removedDirs := make(map[string]InstalledPackage)
+	for _, requested := range plan.RemoveArtifacts {
+		for dir, artifact := range newDB.Artifacts {
+			if normalizePackageName(artifact.Name) != normalizePackageName(requested.Name) || artifactReferencedByClosure(newDB.ProfileClosures, dir) {
+				continue
+			}
+			if _, err := os.Lstat(filepath.Join(paths.Store, dir)); err == nil {
+				removedDirs[dir] = artifact
+			} else if !os.IsNotExist(err) {
+				_ = os.RemoveAll(stageRoot)
+				return wrapAppError("io_error", "inspect package Store artifact", err)
+			}
+		}
+	}
+	for dir := range removedDirs {
+		delete(newDB.Artifacts, dir)
+		for key, pkg := range newDB.Packages {
+			if pkg.Dir == dir {
+				delete(newDB.Packages, key)
+			}
+		}
+		for key, pkg := range newDB.LegacyPackages {
+			if pkg.Dir == dir {
+				delete(newDB.LegacyPackages, key)
+			}
+		}
+		moves = append(moves, transactionMove{Kind: "remove", Source: filepath.Join(paths.Store, dir), Destination: filepath.Join(stageRoot, "old", dir)})
+	}
 	profileDB := Database{Packages: packagesForProfile(newDB, newSettings.ProfileName)}
 	if err := validateInstalledDependencies(profileDB); err != nil {
 		_ = os.RemoveAll(stageRoot)
 		return err
 	}
 	fileChanges := []transactionFileChange{}
+	prunedGenerations, pruneErr := obsoleteGenerationChanges(paths, removedDirs)
+	if pruneErr != nil {
+		_ = os.RemoveAll(stageRoot)
+		return pruneErr
+	}
+	fileChanges = append(fileChanges, prunedGenerations...)
 	if plan.ActivateGeneration != "" {
 		newSettings.GenerationID = plan.ActivateGeneration
 		if newActive.ProfilePath == newSettings.ProfilePath {
@@ -449,10 +488,53 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 		journal.CurrentProfileBackup = currentBackup
 		journal.CurrentProfileContent = []byte(newActive.ProfileName + "\n")
 	}
+	if err := currentCLIContext().Err(); err != nil {
+		_ = os.RemoveAll(stageRoot)
+		return err
+	}
 	if err := applyTransaction(paths, journal, newDB); err != nil {
 		return appError("transaction_failed", err.Error())
 	}
 	return nil
+}
+
+func obsoleteGenerationChanges(paths AppPaths, removed map[string]InstalledPackage) ([]transactionFileChange, error) {
+	if len(removed) == 0 {
+		return nil, nil
+	}
+	profiles, err := listProfileFilenames(paths)
+	if err != nil {
+		return nil, wrapAppError("io_error", "list profiles while removing Store artifacts", err)
+	}
+	changes := []transactionFileChange{}
+	for _, profile := range profiles {
+		generations, _, err := listProfileGenerations(paths, strings.TrimSuffix(profile, ".toml"))
+		if err != nil {
+			return nil, err
+		}
+		for _, generation := range generations {
+			usesRemovedArtifact := false
+			for _, artifactID := range generation.Closure {
+				if _, exists := removed[artifactID]; exists {
+					usesRemovedArtifact = true
+					break
+				}
+			}
+			if !usesRemovedArtifact {
+				continue
+			}
+			path, err := generationPath(paths, generation.Profile, generation.ID)
+			if err != nil {
+				return nil, err
+			}
+			change, err := captureTransactionFileChange(path, nil, 0o644, true)
+			if err != nil {
+				return nil, wrapAppError("io_error", "stage obsolete profile generation", err)
+			}
+			changes = append(changes, change)
+		}
+	}
+	return changes, nil
 }
 
 func validateInstalledDependencies(db Database) error {
@@ -625,22 +707,21 @@ func envInstallManyForProfileWithProgress(paths AppPaths, specs []string, profil
 	if err != nil {
 		return err
 	}
-	if err := ensureProfileClosure(paths, &db, settings); err != nil {
+	if err := ensureProfileClosureWithMissingArtifacts(paths, &db, settings, true); err != nil {
 		return err
 	}
 	profileDB := databaseForProfile(db, settings)
 	plan := newPackagePlan()
-	// Resolve all explicit roots before showing progress so a missing package
-	// cannot appear to have started installing.
+	if onStart != nil {
+		onStart()
+	}
+	// Keep progress visible during repository lookup and dependency resolution.
 	for i := range requests {
 		request := &requests[i]
 		request.ResolvedRepo, _, request.SelectedVersion, _, err = findRepositoryVersionCached(settings, request.Name, request.Version, request.Repo, plan.Indexes)
 		if err != nil {
 			return err
 		}
-	}
-	if onStart != nil {
-		onStart()
 	}
 	for _, request := range requests {
 		if err := resolvePackage(paths, settings, profileDB, plan, request.ResolvedRepo, request.Name, request.SelectedVersion, false); err != nil {
@@ -847,6 +928,9 @@ func envRemoveManyForProfileWithProgress(paths AppPaths, specs []string, profile
 	}
 	plan := newPackagePlan()
 	plan.Resolved = closure
+	for _, installed := range targets {
+		plan.RemoveArtifacts = append(plan.RemoveArtifacts, installed)
+	}
 	if onPlan != nil {
 		onPlan(packageClosureChanges(available, closure))
 	}

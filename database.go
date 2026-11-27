@@ -82,6 +82,11 @@ func loadDatabase(path string) (Database, error) {
 			}
 		}
 		storePath := filepath.Join(filepath.Dir(filepath.Dir(path)), "store")
+		if cleanMissingUnreferencedArtifacts(storePath, &db) {
+			if err := saveDatabase(path, db); err != nil {
+				return Database{}, err
+			}
+		}
 		if err := validateDatabase(db, storePath); err != nil {
 			return Database{}, appError("invalid_database", err.Error())
 		}
@@ -126,6 +131,52 @@ func loadDatabase(path string) (Database, error) {
 		return Database{}, err
 	}
 	return db, nil
+}
+
+// cleanMissingUnreferencedArtifacts removes stale database records only when
+// their Store directory is already gone and no profile closure refers to them.
+// Existing Store artifacts are retained even when currently unreferenced.
+func cleanMissingUnreferencedArtifacts(storePath string, db *Database) bool {
+	if db == nil {
+		return false
+	}
+	missing := map[string]bool{}
+	for id := range db.Artifacts {
+		if artifactReferencedByClosure(db.ProfileClosures, id) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(storePath, id)); os.IsNotExist(err) {
+			missing[id] = true
+		}
+	}
+	if len(missing) == 0 {
+		return false
+	}
+	for id := range missing {
+		delete(db.Artifacts, id)
+	}
+	for key, pkg := range db.Packages {
+		if missing[pkg.Dir] {
+			delete(db.Packages, key)
+		}
+	}
+	for key, pkg := range db.LegacyPackages {
+		if missing[pkg.Dir] {
+			delete(db.LegacyPackages, key)
+		}
+	}
+	return true
+}
+
+func artifactReferencedByClosure(closures map[string]map[string]string, artifactID string) bool {
+	for _, closure := range closures {
+		for _, referenced := range closure {
+			if referenced == artifactID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func saveDatabase(path string, db Database) error {
@@ -217,6 +268,10 @@ func packagesForProfile(db Database, profile string) map[string]InstalledPackage
 }
 
 func ensureProfileClosure(paths AppPaths, db *Database, settings Settings) error {
+	return ensureProfileClosureWithMissingArtifacts(paths, db, settings, false)
+}
+
+func ensureProfileClosureWithMissingArtifacts(paths AppPaths, db *Database, settings Settings, allowMissing bool) error {
 	if db == nil || settings.ProfileName == "" {
 		return appError("invalid_database", "profile identity is missing while validating its package closure")
 	}
@@ -249,6 +304,16 @@ func ensureProfileClosure(paths AppPaths, db *Database, settings Settings) error
 		pkg, found := db.Artifacts[artifactID]
 		if !found || artifactID != pkg.Dir || key == "" || key != normalizePackageName(pkg.Name) {
 			return appError("invalid_database", fmt.Sprintf("profile %s has an invalid artifact reference for %s", settings.ProfileName, name))
+		}
+		if allowMissing {
+			_, statErr := os.Lstat(filepath.Join(paths.Store, pkg.Dir))
+			if os.IsNotExist(statErr) {
+				packages[key] = pkg
+				continue
+			}
+			if statErr != nil {
+				return wrapAppError("store_corrupt", "profile "+settings.ProfileName+" artifact "+name, statErr)
+			}
 		}
 		if err := verifyStoredPackage(paths, pkg); err != nil {
 			return wrapAppError("store_corrupt", "profile "+settings.ProfileName+" artifact "+name, err)

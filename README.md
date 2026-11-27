@@ -1,285 +1,174 @@
-# NixNet
+<p align="center">
+  <img src="https://img.shields.io/badge/NixNet-1.0.0--beta-7c3aed?style=for-the-badge" alt="NixNet 1.0.0 beta">
+  <img src="https://img.shields.io/badge/Go-1.20%2B-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go 1.20 or newer">
+</p>
+
+<h1 align="center">NixNet</h1>
 
 <p align="center">
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.20%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.20 or newer"></a>
-  <a href="https://www.kernel.org/"><img src="https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black" alt="Linux"></a>
-  <a href="https://termux.dev/"><img src="https://img.shields.io/badge/Platform-Termux%20%7C%20Android-2C3E50?logo=android&logoColor=white" alt="Termux and Android"></a>
-  <a href="https://github.com/oversonv/nixnet/blob/main/LICENSE"><img src="https://img.shields.io/github/license/oversonv/nixnet" alt="License"></a>
-  <a href="https://github.com/oversonv/nixnet"><img src="https://img.shields.io/github/stars/oversonv/nixnet?style=social" alt="GitHub stars"></a>
+  A profile-based package manager for Linux and Android/Termux.<br>
+  Install signed Debian packages into isolated environments, with exact versions and recoverable transactions.
 </p>
 
 <p align="center">
-  <strong>A profile-based package manager for Linux and Android/Termux</strong><br>
-  Isolated Store • independent environments • PATH command management
+  <a href="#install">Install</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#profiles">Profiles</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a>
 </p>
 
 <p align="center">
-  <a href="#quick-start"><code>Quick Start</code></a>
-  · <a href="#profiles"><code>Profiles</code></a>
-  · <a href="#configuration"><code>Configuration</code></a>
-  · <a href="#build"><code>Build</code></a>
-  · <a href="docs/ARCHITECTURE.md"><code>Architecture</code></a>
+  <a href="https://github.com/oversonv/nixnet/releases/tag/v1.0.0-beta">Release</a> ·
+  <a href="https://github.com/oversonv/nixnet/blob/main/LICENSE">License</a> ·
+  <a href="https://github.com/oversonv/nixnet/issues">Issues</a>
 </p>
 
-NixNet installs native Debian binary packages (`.deb`) from APT repositories into a private, isolated Store. The active package set is determined by the loaded profile, not by a global enabled list.
+> [!WARNING]
+> **1.0.0-beta** is an early release. It supports ARM64 Linux and Android/Termux. Read the [package compatibility notes](#package-compatibility) before using packages that rely on maintainer scripts.
 
-- Linux and Android/Termux support.
-- Independent profiles with concrete package versions.
-- Repository configuration through `channels.json`.
-- Separate persistent-default and currently-loaded profiles.
-- Bidirectional synchronization of profile commands with `PATH`.
-- Atomic transactions, recovery journaling, and process locking.
-- SHA-256, dependency, archive, and Store verification.
+## Why NixNet?
 
-> [!IMPORTANT]
-> Package payloads remain in the private Store. Only commands from the enabled list of the currently loaded profile are published to `PATH`.
+System package managers own the system. NixNet keeps its package payloads under `$HOME/nix/store` and publishes only the selected profile's commands. It does not install packages into or modify Termux's `dpkg` database.
 
-## Quick Start
+| Capability | What it means |
+|---|---|
+| **Profiles** | Keep separate package sets for different tasks; switch the commands exposed on `PATH`. |
+| **Exact closures** | Resolve each profile to pinned package versions and verified Store artifacts. |
+| **Signed APT metadata** | Verify repository `Release` files with `gpgv`, then check package hashes before extraction. |
+| **Recoverable changes** | Stage installs and removals in a journaled transaction; recover unfinished work on the next command. |
+| **Termux-aware** | Publish command links in `$PREFIX/bin` and recognize dependencies already provided by Termux. |
 
-### Install a prebuilt ARM64 release
+## Install
 
-Linux ARM64 and Android/Termux ARM64 can install the latest development build without Python or `jq`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/oversonv/nixnet/main/install.sh | sh
-```
-
-The installer uses `curl` or `wget` to download the matching binary. Termux installs to `$PREFIX/bin`; Linux installs to `$HOME/.local/bin`.
-
-### Linux
+The release includes prebuilt ARM64 binaries for Linux and Android/Termux. Install the beta with:
 
 ```sh
-go build -o nixnet ./cmd/nixnet
-./nixnet channel list
-./nixnet channel install https://example.org/apt/stable
-./nixnet env install example:package==1.2.3
-./nixnet profiles list
+curl -fsSL https://raw.githubusercontent.com/oversonv/nixnet/main/install.sh \
+  | NIXNET_VERSION=v1.0.0-beta sh
 ```
 
-### Termux / Android
+The installer places the binary in `$PREFIX/bin` on Termux or `$HOME/.local/bin` on Linux. On Linux, add `$HOME/.local/bin` to `PATH` if needed. The installer can also use `wget` when `curl` is unavailable.
+
+NixNet requires the `gpgv` and `xz` executables for signed APT metadata and XZ-compressed package indexes or archives. On Termux, install them with `pkg install gpgv xz` if they are not already present.
+
+## Quick start
 
 ```sh
-pkg install golang gpgv xz
-GOOS=android GOARCH=arm64 go build -o nixnet ./cmd/nixnet
-./nixnet channel list
-./nixnet profiles list
+nixnet --version
+nixnet channel list
+nixnet env install termux:neofetch==latest
+nixnet env list
 ```
 
-On Android, the binary publishes managed links under `$PREFIX/bin`. On regular Linux, links use `$HOME/nix/bin`, which must be added to `PATH`.
+On Android, NixNet can configure the official Termux repository automatically. On Linux, add a signed APT repository first:
 
-## Build
+```sh
+nixnet channel install https://packages.example.org/apt/stable
+nixnet channel fetch stable
+nixnet env install stable:tool==1.2.3
+```
 
-Requirements:
+Use the repository's channel name in package specs. `latest` selects its newest available version; pin an exact version when you need a repeatable environment.
 
-- Go 1.20 or newer.
-- `gpgv` to verify signed APT `Release` files.
-- A trusted repository public key.
-- `xz` for XZ-compressed indexes or archives. Plain, gzip, and bzip2 streams are handled internally.
+## Profiles
+
+A profile is an independent set of requested package roots. NixNet resolves those roots and their dependencies into a concrete closure. `profiles.lock` selects the persistent default, while `.current` identifies the profile whose commands are exposed on `PATH`.
+
+```sh
+nixnet profiles install work
+nixnet --profile work env install termux:eza==latest
+nixnet profiles update work
+nixnet profiles list
+nixnet profiles generations work
+nixnet profiles rollback work <generation-id>
+```
+
+The profile selector targets operations without switching the loaded environment. `profiles update work` applies and loads that profile; it does not change the persistent default.
+
+Successful profile changes record generations so earlier states can be restored offline. When `env remove` physically removes a package, generations that require that package are pruned. A package stays in the Store when another active profile or another package in the same profile still needs it.
+
+## Install, update, and remove
+
+```sh
+# Install one or more packages into the loaded profile
+nixnet env install termux:figlet==2.2.5-3 termux:eza==latest
+
+# Update selected roots from one channel
+nixnet env update termux:all==latest
+nixnet env update termux:eza==latest
+
+# Freeze an exact root version
+nixnet env freeze eza==0.23.5
+nixnet env unfreeze eza==0.23.5
+
+# Remove package roots from the profile
+nixnet env remove figlet==latest eza==latest
+```
+
+Removing a root recomputes the profile closure and unlinks commands no longer provided by it. NixNet physically removes Store artifacts that no remaining active profile references. Dependencies still required by another root, and packages shared with another profile, stay in the Store. The removal and profile update happen in one recoverable transaction.
+
+Short aliases are available: `i` install, `r` remove, `u` update, `l` list, `f` freeze, `uf` unfreeze, and `lf` list frozen packages.
+
+## Repositories and trust
+
+Repository settings live in `$HOME/nix/set/channels.json`. NixNet supports Debian APT repositories: it verifies each signed `Release` file using the repository's configured trusted key, then validates the selected `Packages` index against its signed size and SHA-256. Downloaded package archives are checked against the index hash before extraction.
+
+NixNet reads the system package database only to detect dependencies already installed by Termux or Linux. It never changes that database or replaces `pkg`/APT.
+
+## Package compatibility
+
+NixNet parses Debian `.deb` archives and supports `Depends`, `Pre-Depends`, dependency alternatives and version constraints, architecture restrictions, regular files, directories, supported symlinks, regular-file hardlinks, and package checksums.
+
+Maintainer scripts, triggers, conffile semantics, `Provides`, conflict/replacement rules, `Recommends`, `Suggests`, and complete Multi-Arch behavior are not implemented. Packages requiring unsupported features are rejected rather than partially installed.
+
+## State layout
+
+```text
+$HOME/nix/
+├── store/          verified package payloads
+├── staging/        transaction staging and recovery data
+├── bin/            managed command links on Linux
+├── set/
+│   ├── channels.json
+│   ├── store.json
+│   └── transaction.json
+└── profiles/
+    ├── profiles.lock
+    ├── .current
+    ├── <name>.toml
+    └── <name>/generations/
+```
+
+On Termux, managed command links are published in `$PREFIX/bin`. NixNet reconciles only links it owns; unrelated commands and links are left alone.
+
+## Commands
+
+Run `nixnet --help` for the complete syntax. Main command groups:
+
+| Group | Actions |
+|---|---|
+| `env` | `install`, `remove`, `list`, `update`, `freeze`, `unfreeze`, `frozen` |
+| `channel` | `install`, `remove`, `list`, `fetch` |
+| `profiles` | `list`, `install`, `remove`, `update`, `generations`, `rollback` |
+
+`--profile NAME` selects a target profile for `env` commands without switching the loaded profile.
+
+## Build and test
+
+Requirements: Go 1.20+, `gpgv`, and `xz` for XZ-compressed data.
 
 ```sh
 go test ./...
-go test -race ./...
 go vet ./...
 go build -o nixnet ./cmd/nixnet
 ```
 
-Select a target architecture with standard Go environment variables:
+Build the release targets from the project root:
 
 ```sh
-GOOS=linux GOARCH=amd64 go build -o nixnet ./cmd/nixnet
-GOOS=android GOARCH=arm64 go build -o nixnet ./cmd/nixnet
-GOOS=android GOARCH=arm go build -o nixnet ./cmd/nixnet
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o releases/nixnet-linux-arm64 ./cmd/nixnet
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o releases/nixnet-android-arm64 ./cmd/nixnet
 ```
 
-## Profiles
-
-A profile is an independent working environment with its own package list. Payload files remain in the shared Store; a profile declares exact roots in `name==version` format. NixNet resolves those roots into a profile-owned dependency closure pinned to verified Store artifacts. Identical artifacts may be shared physically, but a package from another profile is not implicitly considered installed in this one.
-
-```text
-profiles.lock  ──► persistent default profile
-.current       ──► currently loaded profile
-profiles/*.toml ─► enabled packages for each profile
-profiles/<name>/.generation ─► active immutable generation
-```
-
-| File / marker | Purpose |
-|---|---|
-| `profiles.lock` | Persistent default profile used by `profiles update` without a name |
-| `.current` | Profile targeted by `env` commands and published to `PATH` |
-| `<name>.toml` | Independent enabled package list |
-| `<name>/.generation` | Active generation ID for the profile |
-| `<name>/generations/*.json` | Immutable roots and Store closure snapshots |
-
-### Example profile
-
-```toml
-[profile]
-enabled = [
-  "neofetch==7.1.0-1",
-]
-```
-
-```sh
-nixnet profiles install work       # create an empty profile without installing packages
-nixnet profiles update work        # apply and load work
-nixnet profiles update             # apply the persistent default from profiles.lock
-nixnet profiles list               # mark the default and list profiles
-nixnet profiles generations work   # list retained profile generations
-nixnet profiles rollback work <id>  # restore a generation without network access
-nixnet profiles remove work        # atomically remove profile state
-```
-
-`profiles update work` does not modify `profiles.lock`: a named profile update affects only the loaded environment.
-
-Each new profile starts with an empty generation. Successful package, freeze, and profile updates record immutable manifests under `profiles/<name>/generations/`. Rollback verifies every referenced Store artifact before changing the profile. Generations are retained until the profile is removed; NixNet does not prune them automatically.
-
-## Configuration
-
-All mutable state is stored under `$HOME/nix/`:
-
-```text
-$HOME/nix/
-├── store/                  # Isolated package directories
-├── staging/                # Temporary atomic transaction data
-├── bin/                    # Command-link directory on regular Linux
-├── set/
-│   ├── channels.json       # Sole repository configuration source
-│   ├── store.json          # Shared artifact index and per-profile resolved closures
-│   ├── transaction.json    # Unfinished transaction journal
-│   └── nixnet.lock        # Process lock
-└── profiles/
-    ├── profiles.lock       # Persistent default profile
-    ├── .current            # Currently loaded profile
-    ├── <name>.toml         # Profile enabled packages
-    └── <name>/
-        ├── .generation     # Current generation ID
-        └── generations/    # Immutable profile state manifests
-```
-
-| Source | Role |
-|---|---|
-| `channels.json` | Repository and APT download configuration |
-| `<name>.toml` | Active package targets for a selected profile |
-| `store.json` | Shared verified artifact index and profile-to-artifact closure references |
-| `profiles.lock` | Default profile for commands without a profile name |
-| `.current` | Profile that determines published commands |
-
-During the initial migration, legacy `settings.toml` is retained as `settings.toml.migrated` or a numbered variant. `settings.toml` is no longer runtime configuration.
-
-## Repositories
-
-`channels.json` is the sole active repository configuration source. The channel list preserves order and repository fields:
-
-```json
-{
-  "channels": [
-    {
-      "name": "main",
-      "url": "https://mirror.example/apt/stable",
-      "distribution": "stable",
-      "component": "main",
-      "architecture": "amd64"
-    }
-  ]
-}
-```
-
-On Android builds, NixNet may create the official Termux channel automatically:
-
-```json
-{
-  "name": "termux",
-  "url": "https://packages-cf.termux.dev/apt/termux-main",
-  "distribution": "stable",
-  "component": "main"
-}
-```
-
-NixNet loads `dists/<distribution>/Release`, verifies the signature with `gpgv`, and downloads a Packages index only when it matches the signed size and SHA-256 metadata.
-
-## Installation and Store
-
-NixNet reads the Debian `ar` container, then `control.tar*` and `data.tar*`, validating package name, version, architecture, paths, symlinks, hardlinks, dependencies, and file checksums. Each downloaded `.deb` is verified against the signed APT Packages index SHA-256.
-
-Package payloads are extracted into a content-addressed Store. Files are not copied into a home profile or maintained as copies inside profiles.
-
-### Platform behavior
-
-| Platform | Managed links | Notes |
-|---|---|---|
-| Linux | `$HOME/nix/bin` | The directory must be added to `PATH` |
-| Android / Termux | `$PREFIX/bin` | Managed links are placed in the standard Termux `PATH` |
-
-At startup and after profile switching, NixNet compares the complete desired link set with existing NixNet-managed links. Third-party binaries and links outside the NixNet Store are not removed.
-
-On Termux, `$PREFIX/var/lib/dpkg/status` is used only to identify dependencies already provided by the system. NixNet does not modify the dpkg database or replace system `pkg` / APT.
-
-## State Flow
-
-```mermaid
-flowchart LR
-    C[channels.json] --> R[Repository resolver]
-    P[loaded profile TOML] --> E[Enabled package targets]
-    E --> U[Update / install plan]
-    R --> U
-    U --> S[Isolated Store]
-    U --> DB[store.json]
-    U --> T[Transaction journal]
-    S --> L[Profile command links]
-    P --> L
-```
-
-## Package Compatibility
-
-Implemented: `Depends`, `Pre-Depends`, alternatives, version constraints, architecture restrictions, regular files, directories, relative symlinks, supported absolute symlinks, and regular-file hardlinks.
-
-Not implemented: maintainer scripts, triggers, conffile semantics, `Provides`, conflict/replacement semantics, `Recommends`, `Suggests`, and complete Multi-Arch rules. Packages containing unsupported files are rejected instead of being partially installed.
-
-## Commands
-
-```sh
-nixnet --help
-nixnet version
-
-# Repositories
-nixnet channel install https://mirror.example/apt/stable
-nixnet channel install https://mirror.example/apt/stable https://mirror.example/apt/testing
-nixnet channel list
-nixnet channel fetch main
-nixnet channel remove main
-nixnet channel remove stable testing
-
-# Packages for the currently loaded profile
-nixnet env install main:neofetch==latest
-nixnet env install main:neofetch==7.1.0-1
-nixnet env install main:figlet==2.2.5-3 main:eza==latest
-nixnet env list
-nixnet env freeze neofetch==7.1.0-1
-nixnet env frozen
-nixnet env unfreeze neofetch==7.1.0-1
-nixnet env remove neofetch==7.1.0-1
-nixnet env remove figlet==latest eza==latest
-
-# Target a profile without switching the currently loaded environment
-nixnet --profile work env install main:neofetch==latest
-nixnet env update --profile work termux:all==latest
-
-# Profiles
-nixnet profiles list
-nixnet profiles install work
-nixnet profiles update work
-nixnet profiles update
-nixnet profiles generations work
-nixnet profiles rollback work <generation-id>
-nixnet profiles remove work
-nixnet env update termux:all==latest
-nixnet env update termux:eza==latest
-```
-
-All `env` commands target the currently loaded profile by default. `--profile NAME` selects another profile without switching the loaded environment. `profiles.lock` remains the persistent default used by `profiles update` when no name is supplied. `profiles update [name]` applies the selected profile and switches the currently loaded environment; it does not upgrade package versions. `env update` upgrades newer package versions in its target profile without switching profiles. A source channel is required: `termux:all==latest` selects enabled root packages in the target profile that came from `termux`; `termux:eza==latest` selects the enabled `eza` root and looks for its newer version in `termux`. Only newer versions are applied, and frozen roots are skipped and reported. `all` leaves roots from other channels alone. An exact version is required for remove, freeze, and unfreeze. Freeze state belongs to a profile and exact package version. `env remove` removes a root target from the target profile and recomputes that profile's closure; dependencies still needed by another target remain in the closure. It does not remove shared Store artifacts or alter another profile. Dependencies are never installed into Termux's or Linux's system package database; system packages may satisfy dependencies through read-only detection.
-
-Short `env` actions are aliases: `i` install, `r` remove, `u` update, `l` list, `f` freeze, `uf` unfreeze, and `lf` list frozen packages. Install and remove accept multiple package specs in one transaction. For example, `nixnet env i main:figlet==2.2.5-3 main:eza==latest` installs both roots, and `nixnet env r figlet==latest eza==latest` removes both. `nixnet env u termux:all==latest` is equivalent to `nixnet env update termux:all==latest`.
-
-## Atomicity and Recovery
-
-Install and remove operations stage package contents and write a transaction journal before changing Store directories, entrypoint links, the package database, profile files, or generation pointers. The journal preserves prior profile and loaded-profile state, allowing an interrupted operation to restore configuration and package state together. Interrupted transactions are recovered by the next command. Mutating commands are serialized with a process lock.
+See [`releases/README.md`](releases/README.md) for asset names and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for implementation details.

@@ -1,6 +1,7 @@
 package nixnet
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,11 +26,9 @@ var usageErrorCodes = map[string]bool{"missing_args": true, "too_many_args": tru
 func appError(code, detail string) error { return &applicationError{code: code, detail: detail} }
 
 func reportWarning(message string) {
-	if os.Getenv("NO_COLOR") == "" {
-		if info, err := os.Stderr.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprintf(os.Stderr, "\033[1;33mwarning\033[0m: %s\n", message)
-			return
-		}
+	if terminalColorsEnabled(os.Stderr) {
+		fmt.Fprintf(os.Stderr, "\033[33mwarning\033[0m: %s\n", message)
+		return
 	}
 	fmt.Fprintf(os.Stderr, "warning: %s\n", message)
 }
@@ -65,16 +64,16 @@ func reportError(err error) int {
 	if err == nil {
 		return 0
 	}
+	if errors.Is(err, context.Canceled) {
+		fmt.Fprintln(os.Stderr, "Interrupted.")
+		return 130
+	}
 	var appErr *applicationError
 	if !errors.As(err, &appErr) {
 		appErr = &applicationError{code: "internal_error", detail: err.Error()}
 	}
-	if os.Getenv("NO_COLOR") == "" {
-		if info, err := os.Stderr.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			fmt.Fprintf(os.Stderr, "\033[1;37merror\033[0m: %s\n", appErr.Error())
-		} else {
-			fmt.Fprintf(os.Stderr, "error: %s\n", appErr.Error())
-		}
+	if terminalColorsEnabled(os.Stderr) {
+		fmt.Fprintf(os.Stderr, "\033[31merror\033[0m: %s\n", appErr.Error())
 	} else {
 		fmt.Fprintf(os.Stderr, "error: %s\n", appErr.Error())
 	}

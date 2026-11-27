@@ -2,21 +2,31 @@ package nixnet
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
-	"unsafe"
 )
 
 const resetColor = "\033[0m"
 
+const (
+	colorProgressWhite   = "37"
+	progressTickInterval = 200 * time.Millisecond
+)
+
+var progressFrames = [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
 func uvColorsEnabled() bool {
+	return terminalColorsEnabled(os.Stdout)
+}
+
+func terminalColorsEnabled(file *os.File) bool {
 	if os.Getenv("NO_COLOR") != "" {
 		return false
 	}
-	info, err := os.Stdout.Stat()
+	info, err := file.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }
 
@@ -32,17 +42,17 @@ func uvPackageRef(name, version string) string {
 }
 
 func uvPackageChange(action string, pkg InstalledPackage) string {
-	marker, color := "+", "38;2;79;156;255"
+	marker, color := "+", "37"
 	switch action {
 	case "Update", "Reinstall":
-		marker, color = "~", "36"
+		marker, color = "~", "38;2;129;199;132"
 	case "Downgrade":
 		marker, color = "~", "33"
 	case "Remove":
 		marker, color = "-", "37"
 	}
 	if uvColorsEnabled() {
-		marker = fmt.Sprintf("\033[1;%sm%s%s", color, marker, resetColor)
+		marker = fmt.Sprintf("\033[%sm%s%s", color, marker, resetColor)
 		return fmt.Sprintf(" %s %s", marker, uvPackageRef(pkg.Name, pkg.Version))
 	}
 	return fmt.Sprintf(" %s %s==%s", marker, pkg.Name, pkg.Version)
@@ -63,37 +73,91 @@ func packageCountLabel(count int) string {
 }
 
 func uvEmphasis(value string) string {
+	return value
+}
+
+func uvErrorLabel(value string) string {
 	if uvColorsEnabled() {
-		return "\033[1m" + value + resetColor
+		return "\033[31m" + value + resetColor
 	}
 	return value
 }
 
-func uvAccent(value string) string {
+func uvAction(value string) string {
+	return value
+}
+
+func uvStatusLabel(value string) string {
 	if uvColorsEnabled() {
-		return "\033[38;2;79;156;255m" + value + resetColor
+		return "\033[32m" + value + resetColor
 	}
 	return value
+}
+
+func uvProgressColor(position, width int) string {
+	if width < 2 {
+		return "38;2;124;34;206"
+	}
+	ratio := float64(position) / float64(width-1)
+	red := 124 + int(84*ratio)
+	green := 34 + int(4*ratio)
+	blue := 206 + int(22*ratio)
+	return fmt.Sprintf("38;2;%d;%d;%d", red, green, blue)
 }
 
 type operationProgress struct {
-	stop   chan bool
-	done   chan struct{}
-	rows   int
-	pinned bool
+	label   string
+	started time.Time
+	stop    chan progressResult
+	done    chan struct{}
 }
 
-type terminalWindowSize struct {
-	rows, columns, xpixel, ypixel uint16
+type progressResult struct {
+	success bool
+	output  string
 }
 
-func terminalRows() int {
-	var size terminalWindowSize
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, os.Stdout.Fd(), uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(&size)))
-	if errno != 0 || size.rows < 3 {
-		return 0
+func progressCompletionLabel(label string) string {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "install":
+		return "Installation"
+	case "remove":
+		return "Removal"
+	case "updates":
+		return "Update"
+	case "checking channel":
+		return "Channel Check"
+	default:
+		return label
 	}
-	return int(size.rows)
+}
+
+func progressCompletionText(label string, success bool) string {
+	text := progressCompletionLabel(label)
+	if success {
+		return text + " Complete"
+	}
+	return text + " Failed"
+}
+
+func progressActiveLabel(label string) string {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "install":
+		return "Installing"
+	case "remove":
+		return "Removing"
+	case "updates":
+		return "Updating"
+	default:
+		return label
+	}
+}
+
+func progressLine(marker, message string) string {
+	if marker == "" {
+		return message
+	}
+	return marker + " " + message
 }
 
 func startOperationProgress(label string) *operationProgress {
@@ -101,60 +165,43 @@ func startOperationProgress(label string) *operationProgress {
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
 		return nil
 	}
-	progress := &operationProgress{stop: make(chan bool, 1), done: make(chan struct{}), rows: terminalRows()}
-	progress.pinned = progress.rows > 0
-	if progress.pinned {
-		fmt.Fprintf(os.Stdout, "\0337\033[1;%dr\033[%d;1H\033[?25l", progress.rows-1, progress.rows)
-	}
+	progress := &operationProgress{label: label, started: time.Now(), stop: make(chan progressResult, 1), done: make(chan struct{})}
 	go func() {
 		defer close(progress.done)
-		ticker := time.NewTicker(80 * time.Millisecond)
+		ticker := time.NewTicker(progressTickInterval)
 		defer ticker.Stop()
-		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 		colorEnabled := uvColorsEnabled()
-		const width = 18
-		render := func(frame int, complete bool) {
-			filled := 0
-			if complete {
-				filled = width
-			}
-			var bar strings.Builder
-			for i := 0; i < width; i++ {
-				if i < filled {
-					if colorEnabled {
-						bar.WriteString("\033[37m#\033[0m")
-					} else {
-						bar.WriteByte('#')
-					}
-				} else if colorEnabled {
-					bar.WriteString("\033[2m─\033[0m")
-				} else {
-					bar.WriteRune('─')
-				}
-			}
-			spinner := frames[frame%len(frames)]
-			labelText := label
+		render := func(frame int) {
+			spinner := progressFrames[frame%len(progressFrames)]
 			if colorEnabled {
-				spinner = "\033[37m" + spinner + resetColor
-				labelText = uvDim(label)
+				spinner = "\033[" + colorProgressWhite + "m" + spinner + resetColor
 			}
-			if progress.pinned {
-				fmt.Fprintf(os.Stdout, "\033[%d;1H", progress.rows)
+			message := progressActiveLabel(label)
+			if colorEnabled {
+				message = "\033[2m" + message + resetColor
 			}
-			fmt.Fprintf(os.Stdout, "\r  %s %s  [%s]\033[K", spinner, labelText, bar.String())
+			fmt.Fprintf(os.Stdout, "\r\033[K%s", progressLine(spinner, message))
 		}
 		for frame := 0; ; frame++ {
-			render(frame, false)
+			render(frame)
 			select {
-			case success := <-progress.stop:
-				render(frame, success)
-				if success {
-					time.Sleep(80 * time.Millisecond)
+			case result := <-progress.stop:
+				if remaining := progressTickInterval - time.Since(progress.started); remaining > 0 {
+					time.Sleep(remaining)
 				}
-				if progress.pinned {
-					fmt.Fprintf(os.Stdout, "\033[%d;1H\033[2K\033[r\0338\033[?25h", progress.rows)
-				} else {
-					fmt.Fprint(os.Stdout, "\r\033[2K")
+				fmt.Fprint(os.Stdout, "\r\033[K")
+				if result.output != "" {
+					fmt.Fprint(os.Stdout, result.output)
+					if !strings.HasSuffix(result.output, "\n") {
+						fmt.Fprintln(os.Stdout)
+					}
+				}
+				if currentCLIContext().Err() == nil {
+					message := progressCompletionText(progress.label, result.success)
+					if colorEnabled && !result.success {
+						message = uvErrorLabel(message)
+					}
+					fmt.Fprintln(os.Stdout, message)
 				}
 				return
 			case <-ticker.C:
@@ -165,18 +212,22 @@ func startOperationProgress(label string) *operationProgress {
 }
 
 func (progress *operationProgress) finish() {
-	progress.stopWithResult(false)
+	progress.stopWithResult(progressResult{})
 }
 
 func (progress *operationProgress) complete() {
-	progress.stopWithResult(true)
+	progress.stopWithResult(progressResult{success: true})
 }
 
-func (progress *operationProgress) stopWithResult(success bool) {
+func (progress *operationProgress) completeWithOutput(output string) {
+	progress.stopWithResult(progressResult{success: true, output: output})
+}
+
+func (progress *operationProgress) stopWithResult(result progressResult) {
 	if progress == nil {
 		return
 	}
-	progress.stop <- success
+	progress.stop <- result
 	<-progress.done
 }
 
@@ -188,14 +239,22 @@ type PackageTransactionItem struct {
 }
 
 func renderResolved(count int, elapsed time.Duration) {
+	renderResolvedTo(os.Stdout, count, elapsed)
+}
+
+func renderResolvedTo(writer io.Writer, count int, elapsed time.Duration) {
 	if count == 0 {
-		fmt.Println(uvDim("No packages to resolve."))
+		fmt.Fprintln(writer, uvDim("No packages to resolve."))
 		return
 	}
-	fmt.Printf("%s %s in %s\n", uvDim("Resolved"), uvEmphasis(packageCountLabel(count)), uvDim(formatOperationDuration(elapsed)))
+	fmt.Fprintf(writer, "%s %s %s %s\n", uvAction("Resolved"), uvEmphasis(packageCountLabel(count)), uvDim("in"), uvDim(formatOperationDuration(elapsed)))
 }
 
 func renderPackageChanges(packages []PackageTransactionItem, elapsed time.Duration) {
+	renderPackageChangesTo(os.Stdout, packages, elapsed)
+}
+
+func renderPackageChangesTo(writer io.Writer, packages []PackageTransactionItem, elapsed time.Duration) {
 	if len(packages) == 0 {
 		return
 	}
@@ -213,44 +272,48 @@ func renderPackageChanges(packages []PackageTransactionItem, elapsed time.Durati
 			break
 		}
 	}
-	fmt.Printf("%s %s in %s\n", uvDim(verb), uvEmphasis(packageCountLabel(len(ordered))), uvDim(formatOperationDuration(elapsed)))
+	fmt.Fprintf(writer, "%s %s %s %s\n", uvAction(verb), uvEmphasis(packageCountLabel(len(ordered))), uvDim("in"), uvDim(formatOperationDuration(elapsed)))
 	for _, item := range ordered {
-		fmt.Println(uvPackageChange(item.Action, item.Package))
+		fmt.Fprintln(writer, uvPackageChange(item.Action, item.Package))
 	}
 }
 
 func renderInstallNoop(plan packageInstallPlan) {
+	renderInstallNoopTo(os.Stdout, plan)
+}
+
+func renderInstallNoopTo(writer io.Writer, plan packageInstallPlan) {
 	if len(plan.Roots) > 1 {
 		for _, root := range plan.Roots {
 			switch {
 			case root.HadPrevious && root.Root.Dir == root.Previous.Dir && !root.ExplicitlyAdded:
-				fmt.Printf("%s %s\n", uvDim("Already up to date:"), uvPackageRef(root.Root.Name, root.Root.Version))
+				fmt.Fprintf(writer, "%s %s\n", uvAction("Already up to date:"), uvPackageRef(root.Root.Name, root.Root.Version))
 			case root.HadPrevious && root.Root.Dir == root.Previous.Dir:
-				fmt.Printf("%s %s to the profile; package files were already available.\n", uvDim("Added"), uvPackageRef(root.Root.Name, root.Root.Version))
+				fmt.Fprintf(writer, "%s %s to the profile; package files were already available.\n", uvAction("Added"), uvPackageRef(root.Root.Name, root.Root.Version))
 			default:
-				fmt.Printf("%s %s; no download was needed.\n", uvDim("Using stored files for"), uvPackageRef(root.Root.Name, root.Root.Version))
+				fmt.Fprintf(writer, "%s %s; no download was needed.\n", uvDim("Using stored files for"), uvPackageRef(root.Root.Name, root.Root.Version))
 			}
 		}
 		return
 	}
 	if plan.HadPrevious && plan.Root.Dir == plan.Previous.Dir && !plan.ExplicitlyAdded {
-		fmt.Printf("%s %s\n", uvDim("Already up to date:"), uvPackageRef(plan.Root.Name, plan.Root.Version))
+		fmt.Fprintf(writer, "%s %s\n", uvAction("Already up to date:"), uvPackageRef(plan.Root.Name, plan.Root.Version))
 		return
 	}
 	if plan.HadPrevious && plan.Root.Dir == plan.Previous.Dir {
-		fmt.Printf("%s %s to the profile; package files were already available.\n", uvDim("Added"), uvPackageRef(plan.Root.Name, plan.Root.Version))
+		fmt.Fprintf(writer, "%s %s to the profile; package files were already available.\n", uvAction("Added"), uvPackageRef(plan.Root.Name, plan.Root.Version))
 		return
 	}
-	fmt.Printf("%s %s; no download was needed.\n", uvDim("Using stored files for"), uvPackageRef(plan.Root.Name, plan.Root.Version))
+	fmt.Fprintf(writer, "%s %s; no download was needed.\n", uvDim("Using stored files for"), uvPackageRef(plan.Root.Name, plan.Root.Version))
 }
 
 func renderUpdateResult(plan packageUpdatePlan, elapsed time.Duration) {
 	if len(plan.Changes) == 0 {
 		if plan.ResolvedCount == 0 {
-			fmt.Println("No packages to update.")
+			fmt.Println(uvDim("No packages to update."))
 			return
 		}
-		fmt.Println("No updates available.")
+		fmt.Println(uvDim("No updates available."))
 		return
 	}
 	renderPackageChanges(plan.Changes, elapsed)
@@ -283,15 +346,15 @@ func renderSimpleSuccess(action, name, version string) {
 	if version != "" {
 		item = uvPackageRef(name, version)
 	}
-	fmt.Printf("%s %s\n", uvDim(action), item)
+	fmt.Printf("%s %s\n", uvAction(action), item)
 }
 
 func renderActionSuccess(action, subject, detail string) {
 	if detail == "" {
-		fmt.Printf("%s %s\n", uvDim(action), uvEmphasis(subject))
+		fmt.Printf("%s %s\n", uvAction(action), uvEmphasis(subject))
 		return
 	}
-	fmt.Printf("%s %s %s\n", uvDim(action), uvEmphasis(subject), uvDim(detail))
+	fmt.Printf("%s %s %s\n", uvAction(action), uvEmphasis(subject), uvDim(detail))
 }
 
 func renderPackageListing(lines []string) {
@@ -322,7 +385,13 @@ func renderChannelFetch(entry Channel, status ChannelStatus) {
 	}
 	fmt.Printf("%s %s\n", uvDim("Channel"), uvEmphasis(entry.Name))
 	fmt.Printf("%s %s\n", uvDim("URL"), entry.URL)
-	fmt.Printf("%s %s %s\n", uvDim("Status"), uvAccent(fmt.Sprintf("%d", status.Status)), status.Reason)
+	statusCode := fmt.Sprintf("%d", status.Status)
+	if status.Status >= 200 && status.Status < 400 {
+		statusCode = uvStatusLabel(statusCode)
+	} else {
+		statusCode = uvErrorLabel(statusCode)
+	}
+	fmt.Printf("%s %s %s\n", uvDim("Status"), statusCode, status.Reason)
 	fmt.Printf("%s %s\n", uvDim("Type"), status.ContentType)
 	fmt.Printf("%s %s\n", uvDim("Packages"), uvEmphasis(fmt.Sprintf("%d", status.PackageCount)))
 	fmt.Printf("%s %s\n", uvDim("Fetched in"), formatOperationDuration(time.Duration(status.ElapsedMS)*time.Millisecond))

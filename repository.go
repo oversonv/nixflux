@@ -3,8 +3,10 @@ package nixnet
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -61,13 +63,16 @@ func fetchBytesLimited(rawURL string, maxBytes int64) ([]byte, error) {
 		}
 		return nil
 	}}
-	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	req, err := http.NewRequestWithContext(currentCLIContext(), http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, appError("request_error", err.Error())
 	}
 	req.Header.Set("User-Agent", "NixNet/0.2 (+Debian APT repository client)")
 	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, context.Canceled
+		}
 		return nil, appError("request_error", err.Error())
 	}
 	defer resp.Body.Close()
@@ -240,7 +245,15 @@ func findRepositoryVersionCached(settings Settings, requestedName, version, pref
 			lastErr = err
 			continue
 		}
-		entry, candidate, ok := lookupRepositoryVersion(index.Packages[normalizePackageName(requestedName)], version)
+		versions := index.Packages[normalizePackageName(requestedName)]
+		var entry RepositoryVersion
+		var candidate string
+		var ok bool
+		if strings.EqualFold(version, "latest") {
+			entry, candidate, ok = latestRepositoryVersion(versions)
+		} else {
+			entry, candidate, ok = lookupRepositoryVersion(versions, version)
+		}
 		if ok {
 			return ch.Name, ch, candidate, entry, nil
 		}

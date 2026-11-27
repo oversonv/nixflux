@@ -227,7 +227,7 @@ func renderProfileGenerations(paths AppPaths, name string) error {
 	for _, generation := range generations {
 		marker := ""
 		if generation.ID == current {
-			marker = " " + uvAccent("(current)")
+			marker = " " + uvEmphasis("(current)")
 		}
 		fmt.Printf("%s  %s  %s %s%s\n", uvEmphasis(generation.ID), uvDim(generation.CreatedAt.UTC().Format("2006-01-02T15:04:05Z")), uvEmphasis(fmt.Sprintf("%d", len(generation.Enabled))), uvDim("roots"), marker)
 	}
@@ -429,7 +429,7 @@ func renderProfiles(paths AppPaths) error {
 	for _, filename := range profiles {
 		name := strings.TrimSuffix(filename, ".toml")
 		if filename == defaultProfile {
-			fmt.Printf("%s %s\n", uvEmphasis(name), uvAccent("(default)"))
+			fmt.Printf("%s %s\n", uvEmphasis(name), uvEmphasis("(default)"))
 		} else {
 			fmt.Println(uvEmphasis(name))
 		}

@@ -1,11 +1,26 @@
 package nixnet
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
+
+var cliContextState = struct {
+	sync.RWMutex
+	ctx context.Context
+}{ctx: context.Background()}
+
+func currentCLIContext() context.Context {
+	cliContextState.RLock()
+	defer cliContextState.RUnlock()
+	return cliContextState.ctx
+}
 
 const usage = `usage: nixnet [-h] [--version] [--profile NAME] <group> <action> [argument]
 
@@ -212,7 +227,7 @@ func runCLI(argv []string) int {
 	if err != nil {
 		return reportError(err)
 	}
-	if strings.HasPrefix(command, "env ") && profile == "" {
+	if strings.HasPrefix(command, "env ") && profile == "" && command != "env install" {
 		if err := ensureProfileClosure(paths, &db, settings); err != nil {
 			return reportError(err)
 		}
@@ -242,22 +257,31 @@ func runCLI(argv []string) int {
 			resolutionElapsed = time.Since(operationStarted)
 			resolvedAt = time.Now()
 		})
-		if progress != nil {
-			if installErr == nil {
-				progress.complete()
-			} else {
+		if installErr != nil {
+			if progress != nil {
 				progress.finish()
 			}
-		}
-		if installErr != nil {
-			fmt.Fprintln(os.Stderr, "Install failed.")
+			if currentCLIContext().Err() == nil {
+				fmt.Fprintln(os.Stderr, "Install failed.")
+			}
 			return reportError(installErr)
 		}
-		renderResolved(planSummary.ResolvedCount, resolutionElapsed)
-		if len(packages) == 0 {
-			renderInstallNoop(planSummary)
+		if progress != nil {
+			var result strings.Builder
+			renderResolvedTo(&result, planSummary.ResolvedCount, resolutionElapsed)
+			if len(packages) == 0 {
+				renderInstallNoopTo(&result, planSummary)
+			} else {
+				renderPackageChangesTo(&result, packages, time.Since(resolvedAt))
+			}
+			progress.completeWithOutput(result.String())
 		} else {
-			renderPackageChanges(packages, time.Since(resolvedAt))
+			renderResolved(planSummary.ResolvedCount, resolutionElapsed)
+			if len(packages) == 0 {
+				renderInstallNoop(planSummary)
+			} else {
+				renderPackageChanges(packages, time.Since(resolvedAt))
+			}
 		}
 	case "env remove":
 		name, version, _ := parsePackageVersionWithLatest(arg, true)
@@ -291,15 +315,17 @@ func runCLI(argv []string) int {
 			}
 		}
 		if removeErr != nil {
-			fmt.Fprintln(os.Stderr, "Remove failed.")
+			if currentCLIContext().Err() == nil {
+				fmt.Fprintln(os.Stderr, "Remove failed.")
+			}
 			return reportError(removeErr)
 		}
-		fmt.Println(uvDim("Dependency check complete in " + formatOperationDuration(time.Since(operationStarted))))
+		fmt.Printf("%s %s\n", uvDim("Dependency check complete in"), uvEmphasis(formatOperationDuration(time.Since(operationStarted))))
 		if len(packages) == 0 {
 			if len(args) == 1 {
-				fmt.Printf("Removed %s==%s from explicit profile requests; files remain required by another package.\n", name, version)
+				fmt.Printf("%s %s from explicit profile requests; files remain required by another package.\n", uvAction("Removed"), uvPackageRef(name, version))
 			} else {
-				fmt.Printf("Removed %d package requests; package files remain required by another package.\n", len(args))
+				fmt.Printf("%s %d package requests; package files remain required by another package.\n", uvAction("Removed"), len(args))
 			}
 		} else {
 			renderPackageChanges(packages, time.Since(resolvedAt))
@@ -370,7 +396,9 @@ func runCLI(argv []string) int {
 			}
 		}
 		if updateErr != nil {
-			fmt.Fprintln(os.Stderr, "Package update failed.")
+			if currentCLIContext().Err() == nil {
+				fmt.Fprintln(os.Stderr, "Package update failed.")
+			}
 			return reportError(updateErr)
 		}
 		renderEnvironmentUpdateResult(updatePlan, time.Since(operationStarted))
@@ -390,7 +418,7 @@ func runCLI(argv []string) int {
 		}
 	case "channel list":
 		if len(settings.Channels) == 0 {
-			fmt.Println("No package channels are configured.")
+			fmt.Println(uvDim("No package channels are configured."))
 		}
 		for _, entry := range settings.Channels {
 			fmt.Printf("%s  %s\n", uvEmphasis(entry.Name), uvDim(entry.URL))
@@ -476,7 +504,9 @@ func runCLI(argv []string) int {
 			progress.finish()
 		}
 		if updateErr != nil {
-			fmt.Fprintf(os.Stderr, "Update of profile %s failed.\n", profileDisplayName(arg))
+			if currentCLIContext().Err() == nil {
+				fmt.Fprintf(os.Stderr, "Update of profile %s failed.\n", profileDisplayName(arg))
+			}
 			return reportError(updateErr)
 		}
 		renderResolved(updatePlan.ResolvedCount, resolutionElapsed)
@@ -490,7 +520,7 @@ func runCLI(argv []string) int {
 			return reportError(err)
 		}
 		if len(updatedSettings.Enabled) == 0 {
-			fmt.Printf("Profile %s has no enabled packages to update.\n", profileDisplayName(arg))
+			fmt.Printf("%s %s %s\n", uvDim("Profile"), uvEmphasis(profileDisplayName(arg)), uvDim("has no enabled packages to update."))
 		} else {
 			renderUpdateResult(updatePlan, time.Since(resolvedAt))
 		}
@@ -538,5 +568,20 @@ func versionFromSpec(spec string) string {
 
 // RunCLI executes the NixNet command-line interface and returns its process exit code.
 func RunCLI(argv []string) int {
-	return runCLI(argv)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cliContextState.Lock()
+	previous := cliContextState.ctx
+	cliContextState.ctx = ctx
+	cliContextState.Unlock()
+	defer func() {
+		cliContextState.Lock()
+		cliContextState.ctx = previous
+		cliContextState.Unlock()
+	}()
+	code := runCLI(argv)
+	if ctx.Err() != nil {
+		return reportError(context.Canceled)
+	}
+	return code
 }

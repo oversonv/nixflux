@@ -372,14 +372,14 @@ func TestEmbeddedMetadataVersionOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Name != "nixnet" || metadata.Version != "0.2.0-dev" || metadata.Data != "2026-11-27" {
+	if metadata.Name != "nixnet" || metadata.Version != "1.0.0-beta" || metadata.Status != "beta" || metadata.Data != "2026-11-27" {
 		t.Fatalf("unexpected embedded metadata: %#v", metadata)
 	}
 	var output bytes.Buffer
 	if err := renderVersion(&output); err != nil {
 		t.Fatal(err)
 	}
-	want := "name: nixnet\nversion: 0.2.0-dev\nstatus: development\ndata: 2026-11-27\n"
+	want := "name: nixnet\nversion: 1.0.0-beta\nstatus: beta\ndata: 2026-11-27\n"
 	if output.String() != want {
 		t.Fatalf("unexpected version output: %s", output.String())
 	}
@@ -1154,6 +1154,36 @@ func TestProfilesUpdateRepairsConflictingCurrentProfileRoots(t *testing.T) {
 	}
 }
 
+func TestEnvInstallRepairsMissingStoreArtifact(t *testing.T) {
+	artifact := makeTestPackage(t, "demo", "1.0.0", nil, []byte("#!/bin/sh\necho demo\n"))
+	server := newTestRepository(t, map[string][]byte{"demo": artifact})
+	defer server.Close()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	paths := pathsForHome(home)
+	if err := saveSettings(paths.Settings, Settings{Channels: []Channel{{Name: "main", URL: server.URL}}, Enabled: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if code := runCLI([]string{"env", "install", "main:demo==1.0.0"}); code != 0 {
+		t.Fatalf("initial install failed with exit code %d", code)
+	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := db.Artifacts[db.ProfileClosures["default.toml"]["demo"]].Dir
+	if err := os.RemoveAll(filepath.Join(paths.Store, dir)); err != nil {
+		t.Fatal(err)
+	}
+	if code := runCLI([]string{"env", "install", "main:demo==latest"}); code != 0 {
+		t.Fatalf("repair install failed with exit code %d", code)
+	}
+	if err := verifyStoredPackage(paths, db.Artifacts[dir]); err != nil {
+		t.Fatalf("repair did not restore missing Store artifact: %v", err)
+	}
+}
+
 func TestEnvInstallRemoveAndReinstallUpdatesEnabledAndCommandLinks(t *testing.T) {
 	artifact := makeTestPackage(t, "neofetch", "1.0.0", nil, []byte("#!/bin/sh\nprintf 'neofetch fixture\\n'\n"))
 	server := newTestRepository(t, map[string][]byte{"neofetch": artifact})
@@ -1240,7 +1270,9 @@ func TestEnvInstallRemoveAndReinstallUpdatesEnabledAndCommandLinks(t *testing.T)
 	}
 	assertEnabled(false)
 	assertLink(false)
-
+	if _, err := os.Stat(filepath.Join(paths.Store, db.Packages["neofetch"].Dir)); !os.IsNotExist(err) {
+		t.Fatalf("removed package still exists in Store: %v", err)
+	}
 	// Reinstalling the exact same version must restore the target state and
 	// must not depend on stale database records or stale command symlinks.
 	install()
@@ -1266,6 +1298,42 @@ func TestEnvInstallRemoveAndReinstallUpdatesEnabledAndCommandLinks(t *testing.T)
 	t.Setenv("PATH", paths.Bin)
 	if _, err := exec.LookPath("neofetch"); err == nil {
 		t.Fatal("a package absent from enabled must not be discoverable through PATH")
+	}
+}
+
+func TestEnvRemoveKeepsStoreArtifactReferencedByAnotherProfile(t *testing.T) {
+	artifact := makeTestPackage(t, "shared", "1.0.0", nil, []byte("#!/bin/sh\necho shared\n"))
+	server := newTestRepository(t, map[string][]byte{"shared": artifact})
+	defer server.Close()
+	paths := pathsForHome(t.TempDir())
+	if err := saveSettings(paths.Settings, Settings{Channels: []Channel{{Name: "main", URL: server.URL}}, Enabled: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := envInstall(paths, "main:shared==1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := installProfile(paths, "work"); err != nil {
+		t.Fatal(err)
+	}
+	if err := envInstallForProfileWithProgress(paths, "main:shared==1.0.0", "work", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := db.ProfileClosures["default.toml"]["shared"]
+	if err := envRemoveForProfileWithProgress(paths, "shared==1.0.0", "default", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Store, dir)); err != nil {
+		t.Fatalf("Store artifact was removed while work profile still references it: %v", err)
+	}
+	if err := envRemoveForProfileWithProgress(paths, "shared==1.0.0", "work", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Store, dir)); !os.IsNotExist(err) {
+		t.Fatalf("Store artifact remains after all profiles removed it: %v", err)
 	}
 }
 
