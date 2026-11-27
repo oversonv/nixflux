@@ -11,8 +11,8 @@ const usage = `usage: nixnet [-h] [--version] [--profile NAME] <group> <action> 
 
 commands:
   version
-  env install <repo:name==version>
-  env remove <name==version|latest>
+  env install <repo:name==version>...
+  env remove <name==version|latest>...
   env list
   env freeze <name==version>
   env unfreeze <name==version>
@@ -25,8 +25,8 @@ commands:
   env f <name==version>  alias for freeze
   env uf <name==version>  alias for unfreeze
   env lf  alias for frozen
-  channel install <url>
-  channel remove <name>
+  channel install <url>...
+  channel remove <name>...
   channel list
   channel fetch <name>
   profiles list
@@ -132,7 +132,8 @@ func runCLI(argv []string) int {
 		}
 		return reportError(appError("missing_args", ""))
 	}
-	if command != "profiles update" && len(args) > expected {
+	variadic := command == "env install" || command == "env remove" || command == "channel install" || command == "channel remove"
+	if command != "profiles update" && !variadic && len(args) > expected {
 		return reportError(appError("too_many_args", strings.Join(args[expected:], " ")))
 	}
 	arg := ""
@@ -142,26 +143,38 @@ func runCLI(argv []string) int {
 	// Validate command arguments before touching configuration or package state.
 	switch command {
 	case "env install":
-		if _, _, _, err := parseRepoPackageSpec(arg); err != nil {
-			return reportError(err)
+		for _, spec := range args {
+			if _, _, _, err := parseRepoPackageSpec(spec); err != nil {
+				return reportError(err)
+			}
 		}
 	case "env update":
 		if _, _, err := parseEnvUpdateSpec(arg); err != nil {
 			return reportError(err)
 		}
 	case "env remove":
-		if _, _, err := parsePackageVersionWithLatest(arg, true); err != nil {
-			return reportError(err)
+		for _, spec := range args {
+			if _, _, err := parsePackageVersionWithLatest(spec, true); err != nil {
+				return reportError(err)
+			}
 		}
 	case "env freeze", "env unfreeze":
 		if _, _, err := parsePackageVersion(arg); err != nil {
 			return reportError(err)
 		}
 	case "channel install":
-		if strings.TrimSpace(arg) == "" {
-			return reportError(appError("invalid_config", "channel URL cannot be empty"))
+		for _, value := range args {
+			if strings.TrimSpace(value) == "" {
+				return reportError(appError("invalid_config", "channel URL cannot be empty"))
+			}
 		}
-	case "channel remove", "channel fetch":
+	case "channel remove":
+		for _, value := range args {
+			if !channelNamePattern.MatchString(value) {
+				return reportError(appError("invalid_config", "invalid channel name"))
+			}
+		}
+	case "channel fetch":
 		if !channelNamePattern.MatchString(arg) {
 			return reportError(appError("invalid_config", "invalid channel name"))
 		}
@@ -212,14 +225,13 @@ func runCLI(argv []string) int {
 	}
 	switch command {
 	case "env install":
-		packageName := packageNameFromSpec(arg)
 		packages := []PackageTransactionItem{}
 		var planSummary packageInstallPlan
 		operationStarted := time.Now()
 		resolvedAt := operationStarted
 		resolutionElapsed := time.Duration(0)
 		var progress *operationProgress
-		installErr := envInstallForProfileWithProgress(paths, arg, profile, func() {
+		installErr := envInstallManyForProfileWithProgress(paths, args, profile, func() {
 			progress = startOperationProgress("Install")
 			if progress == nil {
 				fmt.Println(uvDim("Resolving dependencies..."))
@@ -238,7 +250,7 @@ func runCLI(argv []string) int {
 			}
 		}
 		if installErr != nil {
-			fmt.Fprintf(os.Stderr, "Install %s failed.\n", packageName)
+			fmt.Fprintln(os.Stderr, "Install failed.")
 			return reportError(installErr)
 		}
 		renderResolved(planSummary.ResolvedCount, resolutionElapsed)
@@ -262,7 +274,7 @@ func runCLI(argv []string) int {
 		operationStarted := time.Now()
 		resolvedAt := operationStarted
 		var progress *operationProgress
-		removeErr := envRemoveForProfileWithProgress(paths, arg, profile, func() {
+		removeErr := envRemoveManyForProfileWithProgress(paths, args, profile, func() {
 			progress = startOperationProgress("Remove")
 			if progress == nil {
 				fmt.Println(uvDim("Checking dependent packages..."))
@@ -279,12 +291,16 @@ func runCLI(argv []string) int {
 			}
 		}
 		if removeErr != nil {
-			fmt.Fprintf(os.Stderr, "Remove %s failed.\n", name)
+			fmt.Fprintln(os.Stderr, "Remove failed.")
 			return reportError(removeErr)
 		}
 		fmt.Println(uvDim("Dependency check complete in " + formatOperationDuration(time.Since(operationStarted))))
 		if len(packages) == 0 {
-			fmt.Printf("Removed %s==%s from explicit profile requests; files remain required by another package.\n", name, version)
+			if len(args) == 1 {
+				fmt.Printf("Removed %s==%s from explicit profile requests; files remain required by another package.\n", name, version)
+			} else {
+				fmt.Printf("Removed %d package requests; package files remain required by another package.\n", len(args))
+			}
 		} else {
 			renderPackageChanges(packages, time.Since(resolvedAt))
 		}
@@ -359,15 +375,19 @@ func runCLI(argv []string) int {
 		}
 		renderEnvironmentUpdateResult(updatePlan, time.Since(operationStarted))
 	case "channel install":
-		if err := channelInstall(paths, arg); err != nil {
+		if err := channelInstallMany(paths, args); err != nil {
 			return reportError(err)
 		}
-		renderActionSuccess("Added channel", deriveChannelName(arg), arg)
+		for _, repoURL := range args {
+			renderActionSuccess("Added channel", deriveChannelName(repoURL), repoURL)
+		}
 	case "channel remove":
-		if err := channelRemove(paths, arg); err != nil {
+		if err := channelRemoveMany(paths, args); err != nil {
 			return reportError(err)
 		}
-		renderActionSuccess("Removed channel", arg, "")
+		for _, name := range args {
+			renderActionSuccess("Removed channel", name, "")
+		}
 	case "channel list":
 		if len(settings.Channels) == 0 {
 			fmt.Println("No package channels are configured.")

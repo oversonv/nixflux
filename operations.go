@@ -552,11 +552,19 @@ func envInstall(paths AppPaths, spec string) error {
 
 type packageInstallPlan struct {
 	Changes         []PackageTransactionItem
+	Roots           []packageInstallRoot
 	Root            InstalledPackage
 	Previous        InstalledPackage
 	HadPrevious     bool
 	ExplicitlyAdded bool
 	ResolvedCount   int
+}
+
+type packageInstallRoot struct {
+	Root            InstalledPackage
+	Previous        InstalledPackage
+	HadPrevious     bool
+	ExplicitlyAdded bool
 }
 
 func envInstallWithPlan(paths AppPaths, spec string, onPlan func(packageInstallPlan)) error {
@@ -568,12 +576,41 @@ func envInstallWithProgress(paths AppPaths, spec string, onStart func(), onPlan 
 }
 
 func envInstallForProfileWithProgress(paths AppPaths, spec, profile string, onStart func(), onPlan func(packageInstallPlan)) error {
-	repo, name, version, err := parseRepoPackageSpec(spec)
-	if err != nil {
-		return err
+	return envInstallManyForProfileWithProgress(paths, []string{spec}, profile, onStart, onPlan)
+}
+
+type packageInstallRequest struct {
+	Repo            string
+	Name            string
+	Version         string
+	SelectedVersion string
+	ResolvedRepo    string
+}
+
+func envInstallManyForProfileWithProgress(paths AppPaths, specs []string, profile string, onStart func(), onPlan func(packageInstallPlan)) error {
+	if len(specs) == 0 {
+		return appError("invalid_env_install_format", "at least one package spec is required")
 	}
-	if version == "" {
-		return appError("invalid_env_install_format", spec+"; version is required")
+	requests := make([]packageInstallRequest, 0, len(specs))
+	requestByName := map[string]packageInstallRequest{}
+	for _, spec := range specs {
+		repo, name, version, err := parseRepoPackageSpec(spec)
+		if err != nil {
+			return err
+		}
+		if version == "" {
+			return appError("invalid_env_install_format", spec+"; version is required")
+		}
+		key := normalizePackageName(name)
+		if previous, exists := requestByName[key]; exists {
+			if previous.Repo != repo || !sameRequestedVersion(previous.Version, version) {
+				return appError("dependency_conflict", name+" was requested more than once with different source or version")
+			}
+			continue
+		}
+		request := packageInstallRequest{Repo: repo, Name: name, Version: version}
+		requestByName[key] = request
+		requests = append(requests, request)
 	}
 	settings, err := loadEnvironmentSettings(paths, profile)
 	if err != nil {
@@ -593,36 +630,36 @@ func envInstallForProfileWithProgress(paths AppPaths, spec, profile string, onSt
 	}
 	profileDB := databaseForProfile(db, settings)
 	plan := newPackagePlan()
-	// Resolve the requested package version before showing progress. This catches
-	// missing packages and versions without briefly claiming an install started.
-	rootRepo, _, selectedVersion, _, err := findRepositoryVersionCached(settings, name, version, repo, plan.Indexes)
-	if err != nil {
-		return err
+	// Resolve all explicit roots before showing progress so a missing package
+	// cannot appear to have started installing.
+	for i := range requests {
+		request := &requests[i]
+		request.ResolvedRepo, _, request.SelectedVersion, _, err = findRepositoryVersionCached(settings, request.Name, request.Version, request.Repo, plan.Indexes)
+		if err != nil {
+			return err
+		}
 	}
 	if onStart != nil {
 		onStart()
 	}
-	if err := resolvePackage(paths, settings, profileDB, plan, rootRepo, name, selectedVersion, false); err != nil {
-		return err
-	}
-	resolvedVersion := version
-	if resolved, ok := plan.Resolved[normalizePackageName(name)]; ok {
-		resolvedVersion = resolved.Version
-	} else if installed, ok := profileDB.Packages[normalizePackageName(name)]; ok {
-		resolvedVersion = installed.Version
-	}
-	if strings.EqualFold(resolvedVersion, "latest") || !isValidVersion(resolvedVersion) {
-		return appError("invalid_version", "resolver did not produce a concrete package version")
-	}
-	if err := setEnabledPackage(&newSettings, name, resolvedVersion); err != nil {
-		return err
+	for _, request := range requests {
+		if err := resolvePackage(paths, settings, profileDB, plan, request.ResolvedRepo, request.Name, request.SelectedVersion, false); err != nil {
+			return err
+		}
+		root, ok := plan.Resolved[normalizePackageName(request.Name)]
+		if !ok || !isValidVersion(root.Version) {
+			return appError("invalid_version", "resolver did not produce a concrete package version for "+request.Name)
+		}
+		if err := setEnabledPackage(&newSettings, request.Name, root.Version); err != nil {
+			return err
+		}
 	}
 	for _, target := range newSettings.Enabled {
 		rootName, rootVersion, parseErr := parsePackageVersion(target)
 		if parseErr != nil {
 			return parseErr
 		}
-		if normalizePackageName(rootName) == normalizePackageName(name) {
+		if resolved, ok := plan.Resolved[normalizePackageName(rootName)]; ok && versionsEqual(resolved.Version, rootVersion) {
 			continue
 		}
 		preferredRepo := ""
@@ -638,29 +675,39 @@ func envInstallForProfileWithProgress(paths AppPaths, spec, profile string, onSt
 		}
 	}
 	if onPlan != nil {
-		root := plan.Resolved[normalizePackageName(name)]
-		previous, hadPrevious := profileDB.Packages[normalizePackageName(name)]
-		if root.Name == "" && hadPrevious {
-			root = previous
-		}
 		resolvedCount := len(plan.Resolved)
 		if resolvedCount == 0 {
-			resolvedCount = 1
+			resolvedCount = len(requests)
 		}
-		explicitlyEnabled := false
-		for _, enabledSpec := range settings.Enabled {
-			enabledName, _, parseErr := parsePackageVersion(enabledSpec)
-			if parseErr == nil && normalizePackageName(enabledName) == normalizePackageName(name) {
-				explicitlyEnabled = true
-				break
+		rootResults := make([]packageInstallRoot, 0, len(requests))
+		for _, request := range requests {
+			key := normalizePackageName(request.Name)
+			root := plan.Resolved[key]
+			previous, hadPrevious := profileDB.Packages[key]
+			if root.Name == "" && hadPrevious {
+				root = previous
 			}
+			explicitlyEnabled := false
+			for _, enabledSpec := range settings.Enabled {
+				enabledName, _, parseErr := parsePackageVersion(enabledSpec)
+				if parseErr == nil && normalizePackageName(enabledName) == key {
+					explicitlyEnabled = true
+					break
+				}
+			}
+			rootResults = append(rootResults, packageInstallRoot{Root: root, Previous: previous, HadPrevious: hadPrevious, ExplicitlyAdded: !explicitlyEnabled})
+		}
+		firstRoot := packageInstallRoot{}
+		if len(rootResults) > 0 {
+			firstRoot = rootResults[0]
 		}
 		onPlan(packageInstallPlan{
 			Changes:         packagePlanChanges(paths, profileDB.Packages, plan),
-			Root:            root,
-			Previous:        previous,
-			HadPrevious:     hadPrevious,
-			ExplicitlyAdded: !explicitlyEnabled,
+			Roots:           rootResults,
+			Root:            firstRoot.Root,
+			Previous:        firstRoot.Previous,
+			HadPrevious:     firstRoot.HadPrevious,
+			ExplicitlyAdded: firstRoot.ExplicitlyAdded,
 			ResolvedCount:   resolvedCount,
 		})
 	}
@@ -669,6 +716,13 @@ func envInstallForProfileWithProgress(paths AppPaths, spec, profile string, onSt
 		newActive = newSettings
 	}
 	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, false)
+}
+
+func sameRequestedVersion(a, b string) bool {
+	if strings.EqualFold(a, "latest") || strings.EqualFold(b, "latest") {
+		return strings.EqualFold(a, b)
+	}
+	return versionsEqual(a, b)
 }
 
 func packagePlanChanges(paths AppPaths, current map[string]InstalledPackage, plan *packagePlan) []PackageTransactionItem {
@@ -738,9 +792,12 @@ func envRemoveWithProgress(paths AppPaths, spec string, onStart func(), onPlan f
 }
 
 func envRemoveForProfileWithProgress(paths AppPaths, spec, profile string, onStart func(), onPlan func([]PackageTransactionItem)) error {
-	name, version, err := parsePackageVersionWithLatest(spec, true)
-	if err != nil {
-		return err
+	return envRemoveManyForProfileWithProgress(paths, []string{spec}, profile, onStart, onPlan)
+}
+
+func envRemoveManyForProfileWithProgress(paths AppPaths, specs []string, profile string, onStart func(), onPlan func([]PackageTransactionItem)) error {
+	if len(specs) == 0 {
+		return appError("invalid_env_remove_format", "at least one package spec is required")
 	}
 	settings, err := loadEnvironmentSettings(paths, profile)
 	if err != nil {
@@ -758,16 +815,32 @@ func envRemoveForProfileWithProgress(paths AppPaths, spec, profile string, onSta
 		return err
 	}
 	available := packagesForProfile(db, settings.ProfileName)
-	installed, exists := available[normalizePackageName(name)]
-	if !exists || (!strings.EqualFold(version, "latest") && !versionsEqual(installed.Version, version)) {
-		return appError("package_not_installed", spec)
+	targets := map[string]InstalledPackage{}
+	for _, spec := range specs {
+		name, version, parseErr := parsePackageVersionWithLatest(spec, true)
+		if parseErr != nil {
+			return parseErr
+		}
+		key := normalizePackageName(name)
+		installed, exists := available[key]
+		if !exists || (!strings.EqualFold(version, "latest") && !versionsEqual(installed.Version, version)) {
+			return appError("package_not_installed", spec)
+		}
+		if previous, duplicate := targets[key]; duplicate {
+			if !versionsEqual(previous.Version, installed.Version) {
+				return appError("dependency_conflict", name+" was requested for removal with conflicting versions")
+			}
+			continue
+		}
+		targets[key] = installed
 	}
-	version = installed.Version
 	if onStart != nil {
 		onStart()
 	}
 	newSettings := cloneSettings(settings)
-	removeEnabledPackage(&newSettings, name, version)
+	for _, installed := range targets {
+		removeEnabledPackage(&newSettings, installed.Name, installed.Version)
+	}
 	closure, err := closureFromEnabled(paths, newSettings, available)
 	if err != nil {
 		return err

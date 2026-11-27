@@ -220,6 +220,19 @@ func renderPackageChanges(packages []PackageTransactionItem, elapsed time.Durati
 }
 
 func renderInstallNoop(plan packageInstallPlan) {
+	if len(plan.Roots) > 1 {
+		for _, root := range plan.Roots {
+			switch {
+			case root.HadPrevious && root.Root.Dir == root.Previous.Dir && !root.ExplicitlyAdded:
+				fmt.Printf("%s %s\n", uvDim("Already up to date:"), uvPackageRef(root.Root.Name, root.Root.Version))
+			case root.HadPrevious && root.Root.Dir == root.Previous.Dir:
+				fmt.Printf("%s %s to the profile; package files were already available.\n", uvDim("Added"), uvPackageRef(root.Root.Name, root.Root.Version))
+			default:
+				fmt.Printf("%s %s; no download was needed.\n", uvDim("Using stored files for"), uvPackageRef(root.Root.Name, root.Root.Version))
+			}
+		}
+		return
+	}
 	if plan.HadPrevious && plan.Root.Dir == plan.Previous.Dir && !plan.ExplicitlyAdded {
 		fmt.Printf("%s %s\n", uvDim("Already up to date:"), uvPackageRef(plan.Root.Name, plan.Root.Version))
 		return

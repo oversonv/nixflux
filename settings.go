@@ -1024,35 +1024,75 @@ func deriveChannelName(repoURL string) string {
 }
 
 func channelInstall(paths AppPaths, repoURL string) error {
+	return channelInstallMany(paths, []string{repoURL})
+}
+
+func channelInstallMany(paths AppPaths, repoURLs []string) error {
+	if len(repoURLs) == 0 {
+		return appError("missing_args", "at least one channel URL is required")
+	}
 	settings, err := loadSettings(paths)
 	if err != nil {
 		return err
 	}
-	name := deriveChannelName(repoURL)
+	known := make(map[string]string, len(settings.Channels)+len(repoURLs))
+	existing := make(map[string]bool, len(settings.Channels))
 	for _, ch := range settings.Channels {
-		if ch.Name == name {
+		known[ch.Name] = ch.URL
+		existing[ch.Name] = true
+	}
+	requested := map[string]bool{}
+	toAdd := make([]Channel, 0, len(repoURLs))
+	for _, repoURL := range repoURLs {
+		repoURL = strings.TrimSpace(repoURL)
+		if repoURL == "" {
+			return appError("invalid_config", "channel URL cannot be empty")
+		}
+		name := deriveChannelName(repoURL)
+		if existingURL, exists := known[name]; exists {
+			if !existing[name] && existingURL == repoURL && requested[name] {
+				continue // Repeated identical URLs in one request are harmless.
+			}
 			return appError("channel_already_exists", name)
 		}
+		known[name] = repoURL
+		requested[name] = true
+		toAdd = append(toAdd, defaultAPTChannel(Channel{Name: name, URL: repoURL}))
 	}
-	settings.Channels = append(settings.Channels, defaultAPTChannel(Channel{Name: name, URL: repoURL}))
+	settings.Channels = append(settings.Channels, toAdd...)
 	if err := normalizeSettings(&settings); err != nil {
 		return err
 	}
 	return writeChannels(paths.Channels, settings.Channels)
 }
 func channelRemove(paths AppPaths, name string) error {
+	return channelRemoveMany(paths, []string{name})
+}
+
+func channelRemoveMany(paths AppPaths, names []string) error {
+	if len(names) == 0 {
+		return appError("missing_args", "at least one channel name is required")
+	}
 	settings, err := loadSettings(paths)
 	if err != nil {
 		return err
 	}
+	requested := make(map[string]bool, len(names))
+	available := make(map[string]bool, len(settings.Channels))
+	for _, ch := range settings.Channels {
+		available[ch.Name] = true
+	}
+	for _, name := range names {
+		if !available[name] {
+			return appError("channel_not_found", name)
+		}
+		requested[name] = true
+	}
 	updated := make([]Channel, 0, len(settings.Channels))
 	for _, ch := range settings.Channels {
-		if ch.Name != name {
+		if !requested[ch.Name] {
 			updated = append(updated, ch)
 		}
-	}
-	if len(updated) == len(settings.Channels) {
-		return appError("channel_not_found", name)
 	}
 	settings.Channels = updated
 	if err := normalizeSettings(&settings); err != nil {

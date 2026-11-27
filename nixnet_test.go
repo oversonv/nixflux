@@ -865,6 +865,109 @@ func TestEnvUpdateAliasIsRegistered(t *testing.T) {
 	}
 }
 
+func TestEnvInstallAndRemoveAcceptMultiplePackages(t *testing.T) {
+	artifacts := map[string][]byte{
+		"figlet": makeTestPackage(t, "figlet", "2.2.5-3", nil, []byte("#!/bin/sh\necho figlet\n")),
+		"eza":    makeTestPackage(t, "eza", "0.20.0", nil, []byte("#!/bin/sh\necho eza\n")),
+	}
+	server := newTestRepository(t, artifacts)
+	defer server.Close()
+	paths := pathsForHome(t.TempDir())
+	t.Setenv("HOME", filepath.Dir(paths.Root))
+	if err := saveSettings(paths.Settings, Settings{Channels: []Channel{{Name: "main", URL: server.URL}}, Enabled: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if code := runCLI([]string{"env", "install", "main:figlet==2.2.5-3", "main:eza==latest"}); code != 0 {
+		t.Fatalf("multi-package install failed with exit code %d", code)
+	}
+	settings, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameStrings(settings.Enabled, []string{"eza==0.20.0", "figlet==2.2.5-3"}) {
+		t.Fatalf("multi-package install did not enable both roots: %#v", settings.Enabled)
+	}
+	if code := runCLI([]string{"env", "remove", "figlet==latest", "eza==latest"}); code != 0 {
+		t.Fatalf("multi-package remove failed with exit code %d", code)
+	}
+	settings, err = loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Enabled) != 0 {
+		t.Fatalf("multi-package remove left enabled roots: %#v", settings.Enabled)
+	}
+}
+
+func TestChannelMultiInstallAndRemoveAreAtomic(t *testing.T) {
+	paths := pathsForHome(t.TempDir())
+	initial := Settings{Channels: []Channel{{Name: "base", URL: "https://example.org/base"}}, Enabled: []string{}}
+	if err := saveSettings(paths.Settings, initial); err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Different URLs may derive the same channel name. Reject the whole request.
+	err = channelInstallMany(paths, []string{"https://github.com/one/shared", "https://gitlab.com/two/shared"})
+	if err == nil {
+		t.Fatal("expected derived-name collision to fail")
+	}
+	settings, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Channels) != len(baseline.Channels) {
+		t.Fatalf("failed multi-install partially changed channels: %#v", settings.Channels)
+	}
+	for i := range baseline.Channels {
+		if settings.Channels[i] != baseline.Channels[i] {
+			t.Fatalf("failed multi-install changed existing channels: %#v", settings.Channels)
+		}
+	}
+
+	if err := channelInstallMany(paths, []string{"https://example.org/alpha", "https://example.org/beta", "https://example.org/alpha"}); err != nil {
+		t.Fatalf("multi-install with repeated identical URL failed: %v", err)
+	}
+	settings, err = loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Channels) != len(baseline.Channels)+2 {
+		t.Fatalf("expected two unique channels to be added, got %#v", settings.Channels)
+	}
+
+	// A missing name must prevent removal of every requested channel.
+	err = channelRemoveMany(paths, []string{"alpha", "missing"})
+	if err == nil {
+		t.Fatal("expected removal of missing channel to fail")
+	}
+	settings, err = loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Channels) != len(baseline.Channels)+2 {
+		t.Fatalf("failed multi-remove partially changed channels: %#v", settings.Channels)
+	}
+	if err := channelRemoveMany(paths, []string{"alpha", "beta", "alpha"}); err != nil {
+		t.Fatalf("multi-remove failed: %v", err)
+	}
+	settings, err = loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings.Channels) != len(baseline.Channels) {
+		t.Fatalf("multi-remove left unexpected channels: %#v", settings.Channels)
+	}
+	for i := range baseline.Channels {
+		if settings.Channels[i] != baseline.Channels[i] {
+			t.Fatalf("multi-remove changed an unrequested channel: %#v", settings.Channels)
+		}
+	}
+}
+
 func TestInstallingNewVersionKeepsOldArtifactAndEnvUpdateAllTargetsEnabledRoot(t *testing.T) {
 	artifacts := map[string][]byte{
 		"python-old": makeTestPackage(t, "python", "3.14.0", nil, []byte("#!/bin/sh\necho python 3.14\n")),

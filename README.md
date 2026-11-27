@@ -243,18 +243,22 @@ nixnet version
 
 # Repositories
 nixnet channel install https://mirror.example/apt/stable
+nixnet channel install https://mirror.example/apt/stable https://mirror.example/apt/testing
 nixnet channel list
 nixnet channel fetch main
 nixnet channel remove main
+nixnet channel remove stable testing
 
 # Packages for the currently loaded profile
 nixnet env install main:neofetch==latest
 nixnet env install main:neofetch==7.1.0-1
+nixnet env install main:figlet==2.2.5-3 main:eza==latest
 nixnet env list
 nixnet env freeze neofetch==7.1.0-1
 nixnet env frozen
 nixnet env unfreeze neofetch==7.1.0-1
 nixnet env remove neofetch==7.1.0-1
+nixnet env remove figlet==latest eza==latest
 
 # Target a profile without switching the currently loaded environment
 nixnet --profile work env install main:neofetch==latest
@@ -274,7 +278,7 @@ nixnet env update termux:eza==latest
 
 All `env` commands target the currently loaded profile by default. `--profile NAME` selects another profile without switching the loaded environment. `profiles.lock` remains the persistent default used by `profiles update` when no name is supplied. `profiles update [name]` applies the selected profile and switches the currently loaded environment; it does not upgrade package versions. `env update` upgrades newer package versions in its target profile without switching profiles. A source channel is required: `termux:all==latest` selects enabled root packages in the target profile that came from `termux`; `termux:eza==latest` selects the enabled `eza` root and looks for its newer version in `termux`. Only newer versions are applied, and frozen roots are skipped and reported. `all` leaves roots from other channels alone. An exact version is required for remove, freeze, and unfreeze. Freeze state belongs to a profile and exact package version. `env remove` removes a root target from the target profile and recomputes that profile's closure; dependencies still needed by another target remain in the closure. It does not remove shared Store artifacts or alter another profile. Dependencies are never installed into Termux's or Linux's system package database; system packages may satisfy dependencies through read-only detection.
 
-Short `env` actions are aliases: `i` install, `r` remove, `u` update, `l` list, `f` freeze, `uf` unfreeze, and `lf` list frozen packages. For example, `nixnet env u termux:all==latest` is equivalent to `nixnet env update termux:all==latest`.
+Short `env` actions are aliases: `i` install, `r` remove, `u` update, `l` list, `f` freeze, `uf` unfreeze, and `lf` list frozen packages. Install and remove accept multiple package specs in one transaction. For example, `nixnet env i main:figlet==2.2.5-3 main:eza==latest` installs both roots, and `nixnet env r figlet==latest eza==latest` removes both. `nixnet env u termux:all==latest` is equivalent to `nixnet env update termux:all==latest`.
 
 ## Atomicity and Recovery
 
