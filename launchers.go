@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"fmt"
@@ -54,8 +54,8 @@ func launcherContent(executable string, libraryDirs []string) []byte {
 	}
 	content := "#!" + loader + "\n"
 	if len(libraryDirs) > 0 {
-		content += "NIXFLUX_LIBRARY_PATH=" + shellQuote(strings.Join(libraryDirs, ":")) + "\n"
-		content += "if [ -n \"${LD_LIBRARY_PATH:-}\" ]; then\n  LD_LIBRARY_PATH=\"$NIXFLUX_LIBRARY_PATH:$LD_LIBRARY_PATH\"\nelse\n  LD_LIBRARY_PATH=$NIXFLUX_LIBRARY_PATH\nfi\nexport LD_LIBRARY_PATH\n"
+		content += "NIXNET_LIBRARY_PATH=" + shellQuote(strings.Join(libraryDirs, ":")) + "\n"
+		content += "if [ -n \"${LD_LIBRARY_PATH:-}\" ]; then\n  LD_LIBRARY_PATH=\"$NIXNET_LIBRARY_PATH:$LD_LIBRARY_PATH\"\nelse\n  LD_LIBRARY_PATH=$NIXNET_LIBRARY_PATH\nfi\nexport LD_LIBRARY_PATH\n"
 	}
 	content += "exec " + shellQuote(executable) + " \"$@\"\n"
 	return []byte(content)

@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"bytes"
@@ -20,7 +20,8 @@ import (
 
 const (
 	maxAPTIndexCompressed   = int64(128 << 20)
-	maxAPTIndexDecompressed = int64(512 << 20)
+	maxAPTIndexDecompressed = int64(128 << 20)
+	maxAPTReleaseAge        = 7 * 24 * time.Hour
 )
 
 type aptRelease struct {
@@ -213,9 +214,9 @@ func verifyAPTReleaseSignature(release, signature []byte, channel Channel) error
 		return err
 	}
 	if len(keyrings) == 0 {
-		return fmt.Errorf("no trusted APT keyrings found; install the repository keyring or set NIXFLUX_KEYRING")
+		return fmt.Errorf("no trusted APT keyrings found; install the repository keyring or set NIXNET_KEYRING (NIXFLUX_KEYRING is also supported)")
 	}
-	tempDir, err := os.MkdirTemp("", "nixflux-apt-verify-")
+	tempDir, err := os.MkdirTemp("", "nixnet-apt-verify-")
 	if err != nil {
 		return fmt.Errorf("cannot create signature verification workspace: %w", err)
 	}
@@ -247,7 +248,11 @@ func verifyAPTReleaseSignature(release, signature []byte, channel Channel) error
 
 func aptTrustedKeyrings() ([]string, error) {
 	var patterns []string
-	if custom := strings.TrimSpace(os.Getenv("NIXFLUX_KEYRING")); custom != "" {
+	customKeyring := strings.TrimSpace(os.Getenv("NIXNET_KEYRING"))
+	if customKeyring == "" {
+		customKeyring = strings.TrimSpace(os.Getenv("NIXFLUX_KEYRING"))
+	}
+	if custom := customKeyring; custom != "" {
 		patterns = append(patterns, custom)
 	} else {
 		prefix := strings.TrimSpace(os.Getenv("PREFIX"))
@@ -442,8 +447,14 @@ func parseAPTRelease(raw string) (aptRelease, error) {
 }
 
 func validateAPTReleaseFreshness(release aptRelease, now time.Time) error {
-	if !release.Date.IsZero() && release.Date.After(now.Add(10*time.Minute)) {
+	if release.Date.IsZero() {
+		return fmt.Errorf("APT Release metadata is missing its signed Date")
+	}
+	if release.Date.After(now.Add(10 * time.Minute)) {
 		return fmt.Errorf("APT Release metadata Date is too far in the future")
+	}
+	if now.Sub(release.Date) > maxAPTReleaseAge {
+		return fmt.Errorf("APT Release metadata is older than the maximum age of %s", maxAPTReleaseAge)
 	}
 	if !release.ValidUntil.IsZero() && !now.Before(release.ValidUntil) {
 		return fmt.Errorf("APT Release metadata has expired")

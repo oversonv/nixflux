@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"fmt"
@@ -115,7 +115,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := ensureDirectory(parent, 0o755); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(parent, ".nixflux-tmp-*")
+	f, err := os.CreateTemp(parent, ".nixnet-tmp-*")
 	if err != nil {
 		return err
 	}
@@ -154,7 +154,7 @@ func atomicSymlink(target, link string) error {
 	if err := ensureDirectory(filepath.Dir(link), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(link), ".nixflux-link-*")
+	tmp, err := os.CreateTemp(filepath.Dir(link), ".nixnet-link-*")
 	if err != nil {
 		return err
 	}

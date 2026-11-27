@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	_ "embed"
 )
 
-//go:embed nixflux.json
+//go:embed nixnet.json
 var embeddedMetadata []byte
 
 type applicationMetadata struct {
@@ -21,7 +21,7 @@ type applicationMetadata struct {
 func loadMetadata() (applicationMetadata, error) {
 	var metadata applicationMetadata
 	if err := json.Unmarshal(embeddedMetadata, &metadata); err != nil {
-		return metadata, fmt.Errorf("failed to parse embedded nixflux.json: %w", err)
+		return metadata, fmt.Errorf("failed to parse embedded nixnet.json: %w", err)
 	}
 	return metadata, nil
 }

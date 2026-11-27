@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPEP440Ordering(t *testing.T) {
@@ -94,13 +95,83 @@ enabled = [
 	}
 }
 
-func TestSettingsRejectConflictingEnabledVersions(t *testing.T) {
+func TestSettingsPreferNewerConflictingEnabledVersion(t *testing.T) {
 	settings := Settings{
 		Channels: []Channel{{Name: "main", URL: "https://example.org/repo"}},
 		Enabled:  []string{"neofetch==1.0.0", "Neofetch==2.0.0"},
 	}
-	if err := normalizeSettings(&settings); err == nil {
-		t.Fatal("conflicting enabled versions must be rejected instead of silently selecting one")
+	if err := normalizeSettings(&settings); err != nil {
+		t.Fatalf("normalize conflicting versions: %v", err)
+	}
+	if len(settings.Enabled) != 1 || settings.Enabled[0] != "neofetch==2.0.0" {
+		t.Fatalf("newer enabled version was not selected: %#v", settings.Enabled)
+	}
+}
+
+func TestProfileLoadWarnsForConflictingAndDuplicateEnabledVersions(t *testing.T) {
+	paths := pathsForHome(t.TempDir())
+	for _, profile := range []string{"conflict", "duplicate"} {
+		if err := installProfile(paths, profile); err != nil {
+			t.Fatalf("install profile %s: %v", profile, err)
+		}
+	}
+
+	conflictPath, err := profilePath(paths, "conflict.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conflictPath, []byte(encodeProfileTOML([]string{"python==3.14", "python==3.15"})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	duplicatePath, err := profilePath(paths, "duplicate.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(duplicatePath, []byte(encodeProfileTOML([]string{"python==3.14", "python==3.14"})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	captureLoad := func(filename string) (Settings, string, error) {
+		t.Helper()
+		stderrPath := filepath.Join(t.TempDir(), "stderr.log")
+		stderrFile, createErr := os.Create(stderrPath)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		previousStderr := os.Stderr
+		os.Stderr = stderrFile
+		settings, loadErr := loadProfileSettings(paths, filename)
+		os.Stderr = previousStderr
+		if closeErr := stderrFile.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+		warning, readErr := os.ReadFile(stderrPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return settings, string(warning), loadErr
+	}
+
+	conflict, conflictWarning, err := captureLoad("conflict.toml")
+	if err != nil {
+		t.Fatalf("load conflicting profile: %v", err)
+	}
+	if len(conflict.Enabled) != 1 || conflict.Enabled[0] != "python==3.15" {
+		t.Fatalf("profile did not keep the newer version: %#v", conflict.Enabled)
+	}
+	if !strings.Contains(conflictWarning, "warning: profile conflict.toml contains conflicting versions for python") || !strings.Contains(conflictWarning, "newer version python==3.15 takes priority") {
+		t.Fatalf("missing conflict priority warning: %q", conflictWarning)
+	}
+
+	duplicate, duplicateWarning, err := captureLoad("duplicate.toml")
+	if err != nil {
+		t.Fatalf("load duplicate profile: %v", err)
+	}
+	if len(duplicate.Enabled) != 1 || duplicate.Enabled[0] != "python==3.14" {
+		t.Fatalf("duplicate enabled version was not deduplicated: %#v", duplicate.Enabled)
+	}
+	if !strings.Contains(duplicateWarning, "warning: profile duplicate.toml repeats python==3.14; duplicate entry will be ignored") {
+		t.Fatalf("missing duplicate warning: %q", duplicateWarning)
 	}
 }
 
@@ -113,7 +184,7 @@ func TestRuntimePathsStayUnderHomeNix(t *testing.T) {
 			t.Fatalf("runtime path escaped ~/nix: %s", path)
 		}
 	}
-	if strings.Contains(paths.Store, "nixflux-go") {
+	if strings.Contains(paths.Store, "nixnet-go") {
 		t.Fatalf("store must not be inside source project: %s", paths.Store)
 	}
 }
@@ -301,14 +372,14 @@ func TestEmbeddedMetadataVersionOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Name != "nixflux" || metadata.Version != "0.1.0-dev" || metadata.Data != "2026-11-26" {
+	if metadata.Name != "nixnet" || metadata.Version != "0.2.0-dev" || metadata.Data != "2026-11-27" {
 		t.Fatalf("unexpected embedded metadata: %#v", metadata)
 	}
 	var output bytes.Buffer
 	if err := renderVersion(&output); err != nil {
 		t.Fatal(err)
 	}
-	want := "name: nixflux\nversion: 0.1.0-dev\nstatus: development\ndata: 2026-11-26\n"
+	want := "name: nixnet\nversion: 0.2.0-dev\nstatus: development\ndata: 2026-11-27\n"
 	if output.String() != want {
 		t.Fatalf("unexpected version output: %s", output.String())
 	}
@@ -347,7 +418,7 @@ func makeTestPackage(t *testing.T, name, version string, dependencies []string, 
 		}
 		depends = append(depends, strings.Join(parts, " | "))
 	}
-	control := "Package: " + name + "\nVersion: " + version + "\nArchitecture: all\nDescription: NixFlux integration fixture\n"
+	control := "Package: " + name + "\nVersion: " + version + "\nArchitecture: all\nDescription: NixNet integration fixture\n"
 	if len(depends) > 0 {
 		control += "Depends: " + strings.Join(depends, ", ") + "\n"
 	}
@@ -399,7 +470,7 @@ func newTestRepositoryWithRequestHook(t *testing.T, artifacts map[string][]byte,
 	compressed := gzipBytes(t, packagesRaw)
 	sum := sha256.Sum256(compressed)
 	architecture := runtimeDebianArchitecture()
-	release := fmt.Sprintf("Origin: NixFlux test repository\nSuite: stable\nCodename: stable\nArchitectures: %s\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n", architecture, hex.EncodeToString(sum[:]), len(compressed), architecture)
+	release := fmt.Sprintf("Origin: NixNet test repository\nSuite: stable\nCodename: stable\nDate: %s\nArchitectures: %s\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n", time.Now().UTC().Format(time.RFC1123), architecture, hex.EncodeToString(sum[:]), len(compressed), architecture)
 	signature := signAPTTestRelease(t, []byte(release))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requestHook != nil && requestHook(w, r) {
@@ -767,11 +838,216 @@ func TestEnvInstallLatestPersistsResolvedConcreteVersion(t *testing.T) {
 	if len(settings.Enabled) != 1 || settings.Enabled[0] != "neofetch==1.2.3" {
 		t.Fatalf("latest was not persisted as a concrete resolved version: %#v", settings.Enabled)
 	}
+	var repeatedInstall packageInstallPlan
+	if err := envInstallWithPlan(paths, "main:neofetch==latest", func(plan packageInstallPlan) {
+		repeatedInstall = plan
+	}); err != nil {
+		t.Fatalf("repeating latest install failed: %v", err)
+	}
+	if len(repeatedInstall.Changes) != 0 || !repeatedInstall.HadPrevious || repeatedInstall.Root.Name != "neofetch" || repeatedInstall.Root.Dir != repeatedInstall.Previous.Dir || repeatedInstall.ExplicitlyAdded {
+		t.Fatalf("repeat install did not produce an already-installed result: %#v", repeatedInstall)
+	}
 }
 
 func TestEnvUpdateAliasIsRegistered(t *testing.T) {
-	if commandArgumentCounts["env update"] != 0 || commandArgumentCounts["set update"] != 0 {
-		t.Fatal("both environment update command spellings must be registered")
+	if commandArgumentCounts["env update"] != 1 || commandArgumentCounts["set update"] != 0 {
+		t.Fatal("env update must require a channel and selector, with no implicit all-channel update")
+	}
+	args, profile, handled, err := parseArguments([]string{"env", "update", "termux:all==latest", "--profile", "work"})
+	if err != nil || handled || profile != "work" || !sameStrings(args, []string{"env", "update", "termux:all==latest"}) {
+		t.Fatalf("profile selector was not parsed independently from the env command: args=%#v profile=%q handled=%v err=%v", args, profile, handled, err)
+	}
+	aliases := map[string]string{"i": "install", "r": "remove", "u": "update", "l": "list", "f": "freeze", "uf": "unfreeze", "lf": "frozen"}
+	for short, full := range aliases {
+		if got := canonicalEnvAction(short); got != full {
+			t.Errorf("env alias %q resolved to %q, want %q", short, got, full)
+		}
+	}
+}
+
+func TestInstallingNewVersionKeepsOldArtifactAndEnvUpdateAllTargetsEnabledRoot(t *testing.T) {
+	artifacts := map[string][]byte{
+		"python-old": makeTestPackage(t, "python", "3.14.0", nil, []byte("#!/bin/sh\necho python 3.14\n")),
+		"python-new": makeTestPackage(t, "python", "3.15.2", nil, []byte("#!/bin/sh\necho python 3.15\n")),
+	}
+	server := newTestRepository(t, artifacts)
+	defer server.Close()
+	paths := pathsForHome(t.TempDir())
+	settings := Settings{Channels: []Channel{{Name: "termux", URL: server.URL}}, Enabled: []string{}}
+	if err := saveSettings(paths.Settings, settings); err != nil {
+		t.Fatal(err)
+	}
+	if err := envInstall(paths, "termux:python==3.14.0"); err != nil {
+		t.Fatalf("install old Python: %v", err)
+	}
+	oldSettings, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGeneration := oldSettings.GenerationID
+	if err := envInstall(paths, "termux:python==3.15.2"); err != nil {
+		t.Fatalf("install new Python: %v", err)
+	}
+	current, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(current.Enabled) != 1 || current.Enabled[0] != "python==3.15.2" {
+		t.Fatalf("expected only new Python version to be enabled, got %#v", current.Enabled)
+	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldArtifactFound := false
+	for _, pkg := range db.Artifacts {
+		if pkg.Name == "python" && pkg.Version == "3.14.0" {
+			oldArtifactFound = true
+		}
+	}
+	if !oldArtifactFound {
+		t.Fatal("installing Python 3.15.2 removed Python 3.14.0 from the store database")
+	}
+	if _, err := readProfileGeneration(paths, current.ProfileName, oldGeneration); err != nil {
+		t.Fatalf("previous profile generation no longer references the old environment: %v", err)
+	}
+	var update envUpdatePlan
+	if err := updateEnvironmentWithPlan(paths, "termux:all==latest", nil, func(plan envUpdatePlan) { update = plan }); err != nil {
+		t.Fatalf("update all failed: %v", err)
+	}
+	if update.TargetCount != 1 || len(update.Changes) != 0 {
+		t.Fatalf("update all should inspect only the one enabled Python root, got %#v", update)
+	}
+}
+
+func TestEnvCommandsUseCurrentProfileAndCanTargetInactiveProfileExplicitly(t *testing.T) {
+	artifacts := map[string][]byte{
+		"alpha":    makeTestPackage(t, "alpha", "1.0.0", nil, []byte("#!/bin/sh\necho alpha\n")),
+		"beta-old": makeTestPackage(t, "beta", "1.0.0", nil, []byte("#!/bin/sh\necho beta 1\n")),
+		"beta-new": makeTestPackage(t, "beta", "2.0.0", nil, []byte("#!/bin/sh\necho beta 2\n")),
+	}
+	server := newTestRepository(t, artifacts)
+	defer server.Close()
+	paths := pathsForHome(t.TempDir())
+	if err := saveSettings(paths.Settings, Settings{Channels: []Channel{{Name: "main", URL: server.URL}}, Enabled: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := envInstall(paths, "main:beta==1.0.0"); err != nil {
+		t.Fatalf("install default profile fixture: %v", err)
+	}
+	if err := installProfile(paths, "work"); err != nil {
+		t.Fatalf("create work profile: %v", err)
+	}
+	if err := updateProfile(paths, "work", true); err != nil {
+		t.Fatalf("load work profile: %v", err)
+	}
+	if err := envInstall(paths, "main:alpha==1.0.0"); err != nil {
+		t.Fatalf("install into current work profile: %v", err)
+	}
+	current, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultSettings, err := loadDefaultSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ProfileName != "work.toml" || len(current.Enabled) != 1 || current.Enabled[0] != "alpha==1.0.0" {
+		t.Fatalf("env install did not target current profile: %#v", current)
+	}
+	if len(defaultSettings.Enabled) != 1 || defaultSettings.Enabled[0] != "beta==1.0.0" {
+		t.Fatalf("install into current profile mutated default profile: %#v", defaultSettings.Enabled)
+	}
+	if err := updateEnvironmentForProfileWithPlan(paths, "main:all==latest", "default", nil, nil); err != nil {
+		t.Fatalf("update inactive default profile explicitly: %v", err)
+	}
+	current, err = loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultSettings, err = loadDefaultSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ProfileName != "work.toml" || len(current.Enabled) != 1 || current.Enabled[0] != "alpha==1.0.0" {
+		t.Fatalf("updating inactive profile switched or changed current profile: %#v", current)
+	}
+	if len(defaultSettings.Enabled) != 1 || defaultSettings.Enabled[0] != "beta==2.0.0" {
+		t.Fatalf("explicit inactive-profile update did not update default root: %#v", defaultSettings.Enabled)
+	}
+	if err := setFreezeForProfile(paths, "beta==2.0.0", "default", true); err != nil {
+		t.Fatalf("freeze package in inactive profile: %v", err)
+	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db.ProfileFrozen["default.toml"]["beta"] != "2.0.0" || len(db.ProfileFrozen["work.toml"]) != 0 {
+		t.Fatalf("freeze state leaked between profiles: %#v", db.ProfileFrozen)
+	}
+	if err := setFreezeForProfile(paths, "beta==2.0.0", "default", false); err != nil {
+		t.Fatalf("unfreeze package in inactive profile: %v", err)
+	}
+	if err := envRemoveForProfileWithProgress(paths, "beta==2.0.0", "default", nil, nil); err != nil {
+		t.Fatalf("remove package from inactive profile: %v", err)
+	}
+	defaultSettings, err = loadDefaultSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defaultSettings.Enabled) != 0 {
+		t.Fatalf("remove did not clear target profile root: %#v", defaultSettings.Enabled)
+	}
+	current, err = loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(paths.Bin, "alpha")); err != nil {
+		t.Fatalf("current profile command disappeared after inactive update: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(paths.Bin, "beta")); !os.IsNotExist(err) {
+		t.Fatalf("inactive profile command was exposed in current PATH: %v", err)
+	}
+}
+
+func TestProfilesUpdateRepairsConflictingCurrentProfileRoots(t *testing.T) {
+	artifacts := map[string][]byte{
+		"python-310": makeTestPackage(t, "python", "3.10.0", nil, []byte("#!/bin/sh\necho python 3.10\n")),
+		"python-312": makeTestPackage(t, "python", "3.12.0", nil, []byte("#!/bin/sh\necho python 3.12\n")),
+	}
+	server := newTestRepository(t, artifacts)
+	defer server.Close()
+	paths := pathsForHome(t.TempDir())
+	t.Setenv("HOME", filepath.Dir(paths.Root))
+	if err := saveSettings(paths.Settings, Settings{Channels: []Channel{{Name: "main", URL: server.URL}}, Enabled: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := envInstall(paths, "main:python==3.10.0"); err != nil {
+		t.Fatalf("install initial Python: %v", err)
+	}
+	profile, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(profile.ProfilePath, []byte(encodeProfileTOML([]string{"python==3.10.0", "python==3.12.0"})), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := runCLI([]string{"profiles", "update"}); code != 0 {
+		t.Fatalf("profiles update failed to apply normalized conflicting roots: exit %d", code)
+	}
+	updated, err := loadSettings(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Enabled) != 1 || updated.Enabled[0] != "python==3.12.0" {
+		t.Fatalf("newer conflicting root did not take priority: %#v", updated.Enabled)
+	}
+	profileRaw, err := os.ReadFile(updated.ProfilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(profileRaw), "3.10.0") || !strings.Contains(string(profileRaw), "python==3.12.0") {
+		t.Fatalf("profile file was not canonicalized to the selected root: %s", profileRaw)
 	}
 }
 

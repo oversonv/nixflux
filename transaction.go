@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"bytes"
@@ -803,7 +803,7 @@ func buildLinkChanges(paths AppPaths, oldDB, newDB Database, oldSettings, newSet
 	for name := range newLinks {
 		all[name] = true
 	}
-	// Include stale links created by older NixFlux versions, which published
+	// Include stale links created by older NixNet versions, which published
 	// every installed package regardless of settings.enabled.
 	entries, readDirErr := os.ReadDir(paths.Bin)
 	if readDirErr != nil && !os.IsNotExist(readDirErr) {

@@ -2,11 +2,11 @@
 
 set -eu
 
-VERSION=${NIXFLUX_VERSION:-v0.1.0-dev}
-REPOSITORY=${NIXFLUX_REPOSITORY:-oversonv/nixflux}
+VERSION=${NIXNET_VERSION:-${NIXFLUX_VERSION:-v0.2.0-dev}}
+REPOSITORY=${NIXNET_REPOSITORY:-${NIXFLUX_REPOSITORY:-oversonv/nixnet}}
 
 fail() {
-	printf 'nixflux installer: %s\n' "$*" >&2
+	printf 'nixnet installer: %s\n' "$*" >&2
 	exit 1
 }
 
@@ -21,14 +21,14 @@ case "$(uname -m)" in
 esac
 
 if [ -n "${PREFIX:-}" ] && [ -d "$PREFIX" ]; then
-	TARGET=nixflux-android-arm64
-	INSTALL_DIR=${NIXFLUX_INSTALL_DIR:-$PREFIX/bin}
+	TARGET=nixnet-android-arm64
+	INSTALL_DIR=${NIXNET_INSTALL_DIR:-${NIXFLUX_INSTALL_DIR:-$PREFIX/bin}}
 else
-	TARGET=nixflux-linux-arm64
-	INSTALL_DIR=${NIXFLUX_INSTALL_DIR:-$HOME/.local/bin}
+	TARGET=nixnet-linux-arm64
+	INSTALL_DIR=${NIXNET_INSTALL_DIR:-${NIXFLUX_INSTALL_DIR:-$HOME/.local/bin}}
 fi
 
-BASE_URL=${NIXFLUX_RELEASE_BASE_URL:-https://github.com/$REPOSITORY/releases/download/$VERSION}
+BASE_URL=${NIXNET_RELEASE_BASE_URL:-${NIXFLUX_RELEASE_BASE_URL:-https://github.com/$REPOSITORY/releases/download/$VERSION}}
 URL=$BASE_URL/$TARGET
 
 if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
@@ -36,11 +36,13 @@ if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
 fi
 
 mkdir -p "$INSTALL_DIR" || fail "cannot create install directory: $INSTALL_DIR"
-TMP=${TMPDIR:-/tmp}/nixflux-install-$$
-trap 'rm -f "$TMP"' 0
+umask 077
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/nixnet-install.XXXXXXXX") || fail "cannot create a private temporary directory"
+TMP=$TMP_DIR/$TARGET
+trap 'rm -rf "$TMP_DIR"' 0
 trap 'exit 1' HUP INT TERM
 
-printf 'Installing NixFlux %s for %s...\n' "$VERSION" "$TARGET"
+printf 'Installing NixNet %s for %s...\n' "$VERSION" "$TARGET"
 
 download() {
 	if command -v curl >/dev/null 2>&1; then
@@ -76,8 +78,8 @@ fi
 
 [ -s "$TMP" ] || fail "downloaded file is empty"
 chmod 755 "$TMP" || fail "cannot make downloaded binary executable"
-mv -f "$TMP" "$INSTALL_DIR/nixflux" || fail "cannot install binary to $INSTALL_DIR"
-printf 'Installed to %s/nixflux\n' "$INSTALL_DIR"
+mv -f "$TMP" "$INSTALL_DIR/nixnet" || fail "cannot install binary to $INSTALL_DIR"
+printf 'Installed to %s/nixnet\n' "$INSTALL_DIR"
 case ":${PATH:-}:" in
 	*":$INSTALL_DIR:"*) ;;
 	*) printf 'Add this directory to PATH: %s\n' "$INSTALL_DIR" ;;

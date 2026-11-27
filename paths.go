@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"os"
@@ -53,6 +53,8 @@ func pathsForHomeForPlatform(home, goos, prefix string) AppPaths {
 		Database:       filepath.Join(set, "store.json"),
 		Transaction:    filepath.Join(set, "transaction.json"),
 		Staging:        filepath.Join(root, "staging"),
+		// Keep the historical lock path so old NixFlux and new NixNet
+		// processes still serialize against the same runtime state.
 		Lock:           filepath.Join(set, "nixflux.lock"),
 		LegacyChannels: filepath.Join(set, "channels.json"),
 		LegacyBin:      legacyBin,

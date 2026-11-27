@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"fmt"
@@ -264,7 +264,7 @@ func commitPackagePlan(paths AppPaths, db Database, plan *packagePlan, oldSettin
 	if err := normalizeSettings(&newSettings); err != nil {
 		return err
 	}
-	profileChanged := encodeProfileTOML(oldSettings.Enabled) != encodeProfileTOML(newSettings.Enabled)
+	profileChanged := oldSettings.EnabledNeedsNormalization || encodeProfileTOML(oldSettings.Enabled) != encodeProfileTOML(newSettings.Enabled)
 	loadedChanged := switchLoaded && oldActive.ProfileName != newActive.ProfileName
 	activeChanged := encodeProfileTOML(oldActive.Enabled) != encodeProfileTOML(newActive.Enabled) || oldActive.ProfileName != newActive.ProfileName
 	closureChanged := db.SchemaVersion < databaseSchemaVersion
@@ -550,7 +550,24 @@ func envInstall(paths AppPaths, spec string) error {
 	return envInstallWithPlan(paths, spec, nil)
 }
 
-func envInstallWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransactionItem)) error {
+type packageInstallPlan struct {
+	Changes         []PackageTransactionItem
+	Root            InstalledPackage
+	Previous        InstalledPackage
+	HadPrevious     bool
+	ExplicitlyAdded bool
+	ResolvedCount   int
+}
+
+func envInstallWithPlan(paths AppPaths, spec string, onPlan func(packageInstallPlan)) error {
+	return envInstallWithProgress(paths, spec, nil, onPlan)
+}
+
+func envInstallWithProgress(paths AppPaths, spec string, onStart func(), onPlan func(packageInstallPlan)) error {
+	return envInstallForProfileWithProgress(paths, spec, "", onStart, onPlan)
+}
+
+func envInstallForProfileWithProgress(paths AppPaths, spec, profile string, onStart func(), onPlan func(packageInstallPlan)) error {
 	repo, name, version, err := parseRepoPackageSpec(spec)
 	if err != nil {
 		return err
@@ -558,7 +575,7 @@ func envInstallWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransa
 	if version == "" {
 		return appError("invalid_env_install_format", spec+"; version is required")
 	}
-	settings, err := loadDefaultSettings(paths)
+	settings, err := loadEnvironmentSettings(paths, profile)
 	if err != nil {
 		return err
 	}
@@ -576,7 +593,16 @@ func envInstallWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransa
 	}
 	profileDB := databaseForProfile(db, settings)
 	plan := newPackagePlan()
-	if err := resolvePackage(paths, settings, profileDB, plan, repo, name, version, false); err != nil {
+	// Resolve the requested package version before showing progress. This catches
+	// missing packages and versions without briefly claiming an install started.
+	rootRepo, _, selectedVersion, _, err := findRepositoryVersionCached(settings, name, version, repo, plan.Indexes)
+	if err != nil {
+		return err
+	}
+	if onStart != nil {
+		onStart()
+	}
+	if err := resolvePackage(paths, settings, profileDB, plan, rootRepo, name, selectedVersion, false); err != nil {
 		return err
 	}
 	resolvedVersion := version
@@ -612,7 +638,31 @@ func envInstallWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransa
 		}
 	}
 	if onPlan != nil {
-		onPlan(packagePlanChanges(paths, profileDB.Packages, plan))
+		root := plan.Resolved[normalizePackageName(name)]
+		previous, hadPrevious := profileDB.Packages[normalizePackageName(name)]
+		if root.Name == "" && hadPrevious {
+			root = previous
+		}
+		resolvedCount := len(plan.Resolved)
+		if resolvedCount == 0 {
+			resolvedCount = 1
+		}
+		explicitlyEnabled := false
+		for _, enabledSpec := range settings.Enabled {
+			enabledName, _, parseErr := parsePackageVersion(enabledSpec)
+			if parseErr == nil && normalizePackageName(enabledName) == normalizePackageName(name) {
+				explicitlyEnabled = true
+				break
+			}
+		}
+		onPlan(packageInstallPlan{
+			Changes:         packagePlanChanges(paths, profileDB.Packages, plan),
+			Root:            root,
+			Previous:        previous,
+			HadPrevious:     hadPrevious,
+			ExplicitlyAdded: !explicitlyEnabled,
+			ResolvedCount:   resolvedCount,
+		})
 	}
 	newActive := active
 	if active.ProfilePath == settings.ProfilePath {
@@ -628,7 +678,7 @@ func packagePlanChanges(paths AppPaths, current map[string]InstalledPackage, pla
 		if exists && installed.Dir == pkg.Dir && !plan.Replace[key] {
 			continue
 		}
-		item := PackageTransactionItem{Package: pkg, DownloadSize: plan.DownloadSizes[key]}
+		item := PackageTransactionItem{Package: pkg, DownloadSize: plan.DownloadSizes[key], Action: packageChangeAction(installed, pkg, exists)}
 		if artifact, ok := plan.Artifacts[key]; ok {
 			item.InstalledSize = artifact.InstalledSize
 		} else if size, err := packageStorePayloadSize(paths, pkg); err == nil {
@@ -644,7 +694,7 @@ func packageClosureChanges(current, resolved map[string]InstalledPackage) []Pack
 	for key, installed := range current {
 		retained, exists := resolved[key]
 		if !exists || retained.Dir != installed.Dir {
-			changes = append(changes, PackageTransactionItem{Package: installed})
+			changes = append(changes, PackageTransactionItem{Package: installed, Action: "Remove"})
 		}
 	}
 	return changes
@@ -680,11 +730,19 @@ func envRemove(paths AppPaths, spec string) error {
 }
 
 func envRemoveWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransactionItem)) error {
+	return envRemoveWithProgress(paths, spec, nil, onPlan)
+}
+
+func envRemoveWithProgress(paths AppPaths, spec string, onStart func(), onPlan func([]PackageTransactionItem)) error {
+	return envRemoveForProfileWithProgress(paths, spec, "", onStart, onPlan)
+}
+
+func envRemoveForProfileWithProgress(paths AppPaths, spec, profile string, onStart func(), onPlan func([]PackageTransactionItem)) error {
 	name, version, err := parsePackageVersionWithLatest(spec, true)
 	if err != nil {
 		return err
 	}
-	settings, err := loadDefaultSettings(paths)
+	settings, err := loadEnvironmentSettings(paths, profile)
 	if err != nil {
 		return err
 	}
@@ -705,6 +763,9 @@ func envRemoveWithPlan(paths AppPaths, spec string, onPlan func([]PackageTransac
 		return appError("package_not_installed", spec)
 	}
 	version = installed.Version
+	if onStart != nil {
+		onStart()
+	}
 	newSettings := cloneSettings(settings)
 	removeEnabledPackage(&newSettings, name, version)
 	closure, err := closureFromEnabled(paths, newSettings, available)
@@ -788,11 +849,15 @@ func closureFromEnabled(paths AppPaths, settings Settings, available map[string]
 }
 
 func setFreeze(paths AppPaths, spec string, frozen bool) error {
+	return setFreezeForProfile(paths, spec, "", frozen)
+}
+
+func setFreezeForProfile(paths AppPaths, spec, profile string, frozen bool) error {
 	name, version, err := parsePackageVersion(spec)
 	if err != nil {
 		return err
 	}
-	settings, err := loadDefaultSettings(paths)
+	settings, err := loadEnvironmentSettings(paths, profile)
 	if err != nil {
 		return err
 	}
@@ -838,6 +903,169 @@ func setUpdate(paths AppPaths) error {
 }
 
 func updateProfile(paths AppPaths, name string, makeCurrent bool) error {
+	return updateProfileWithPlan(paths, name, makeCurrent, nil)
+}
+
+type packageUpdatePlan struct {
+	Changes       []PackageTransactionItem
+	ResolvedCount int
+}
+
+type envUpdatePlan struct {
+	Channel     string
+	Selector    string
+	Profile     string
+	TargetCount int
+	Changes     []PackageTransactionItem
+	Frozen      []InstalledPackage
+	Unavailable []InstalledPackage
+}
+
+// updateEnvironmentWithPlan upgrades roots in the currently loaded profile.
+// The channel is mandatory so an update never silently changes package source.
+func updateEnvironmentWithPlan(paths AppPaths, spec string, onStart func(), onPlan func(envUpdatePlan)) error {
+	return updateEnvironmentForProfileWithPlan(paths, spec, "", onStart, onPlan)
+}
+
+func updateEnvironmentForProfileWithPlan(paths AppPaths, spec, profile string, onStart func(), onPlan func(envUpdatePlan)) error {
+	repo, selector, err := parseEnvUpdateSpec(spec)
+	if err != nil {
+		return err
+	}
+	settings, err := loadEnvironmentSettings(paths, profile)
+	if err != nil {
+		return err
+	}
+	db, err := loadDatabase(paths.Database)
+	if err != nil {
+		return err
+	}
+	if err := ensureProfileClosure(paths, &db, settings); err != nil {
+		return err
+	}
+	profileDB := databaseForProfile(db, settings)
+	channel, exists := repositoryChannel(settings, repo)
+	if !exists {
+		return appError("channel_not_found", repo)
+	}
+	selected := map[string]InstalledPackage{}
+	selectedKey := normalizePackageName(selector)
+	for _, enabled := range settings.Enabled {
+		name, _, parseErr := parsePackageVersion(enabled)
+		if parseErr != nil {
+			return parseErr
+		}
+		pkg, installed := profileDB.Packages[normalizePackageName(name)]
+		if !installed {
+			continue
+		}
+		if strings.EqualFold(selector, "all") {
+			if pkg.Source == repo {
+				selected[normalizePackageName(name)] = pkg
+			}
+		} else if normalizePackageName(name) == selectedKey {
+			selected[normalizePackageName(name)] = pkg
+		}
+	}
+	if !strings.EqualFold(selector, "all") && len(selected) == 0 {
+		return appError("package_not_installed", selector+" in the currently loaded profile")
+	}
+
+	result := envUpdatePlan{Channel: repo, Selector: selector, Profile: strings.TrimSuffix(settings.ProfileName, ".toml"), TargetCount: len(selected)}
+	if len(selected) == 0 {
+		if onPlan != nil {
+			onPlan(result)
+		}
+		return nil
+	}
+	updateKeys := make([]string, 0, len(selected))
+	for key, pkg := range selected {
+		if pkg.Frozen {
+			result.Frozen = append(result.Frozen, pkg)
+			continue
+		}
+		updateKeys = append(updateKeys, key)
+	}
+	sortStrings(updateKeys)
+	if len(updateKeys) == 0 {
+		if onPlan != nil {
+			onPlan(result)
+		}
+		return nil
+	}
+	if onStart != nil {
+		onStart()
+	}
+	plan := newPackagePlan()
+	index, err := loadRepositoryIndexCached(channel, plan.Indexes)
+	if err != nil {
+		return err
+	}
+	newSettings := cloneSettings(settings)
+	for _, key := range updateKeys {
+		installed := selected[key]
+		entry, latest, found := latestRepositoryVersion(index.Packages[key])
+		if !found {
+			if !strings.EqualFold(selector, "all") {
+				return appError("version_not_found", installed.Name+" latest in channel "+repo)
+			}
+			result.Unavailable = append(result.Unavailable, installed)
+			continue
+		}
+		comparison, compareErr := compareRepositoryVersions(latest, installed.Version, entry.Debian)
+		if compareErr != nil {
+			return appError("invalid_version", compareErr.Error())
+		}
+		if comparison <= 0 {
+			continue
+		}
+		if err := resolvePackage(paths, settings, profileDB, plan, repo, installed.Name, latest, false); err != nil {
+			return err
+		}
+		if err := setEnabledPackage(&newSettings, installed.Name, latest); err != nil {
+			return err
+		}
+	}
+	available := make(map[string]InstalledPackage, len(profileDB.Packages)+len(plan.Resolved))
+	for key, pkg := range profileDB.Packages {
+		available[key] = pkg
+	}
+	for key, pkg := range plan.Resolved {
+		available[key] = pkg
+	}
+	closure, err := closureFromEnabled(paths, newSettings, available)
+	if err != nil {
+		return err
+	}
+	plan.Resolved = closure
+	result.Changes = packagePlanChanges(paths, profileDB.Packages, plan)
+	for key, pkg := range profileDB.Packages {
+		if _, retained := closure[key]; !retained {
+			result.Changes = append(result.Changes, PackageTransactionItem{Package: pkg, Action: "Remove"})
+		}
+	}
+	if onPlan != nil {
+		onPlan(result)
+	}
+	active, err := loadSettings(paths)
+	if err != nil {
+		return err
+	}
+	newActive := active
+	if active.ProfilePath == settings.ProfilePath {
+		newActive = newSettings
+	}
+	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, false)
+}
+
+func compareRepositoryVersions(candidate, installed string, debian bool) (int, error) {
+	if debian {
+		return compareDebianVersions(candidate, installed)
+	}
+	return compareVersions(candidate, installed)
+}
+
+func updateProfileWithPlan(paths AppPaths, name string, makeCurrent bool, onPlan func(packageUpdatePlan)) error {
 	var settings Settings
 	var err error
 	if name == "" {
@@ -887,16 +1115,36 @@ func updateProfile(paths AppPaths, name string, makeCurrent bool) error {
 	if makeCurrent || active.ProfilePath == settings.ProfilePath {
 		newActive = newSettings
 	}
+	if onPlan != nil {
+		onPlan(packageUpdatePlan{Changes: packagePlanChanges(paths, profileDB.Packages, plan), ResolvedCount: len(settings.Enabled)})
+	}
 	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, makeCurrent)
+}
+
+func packageChangeAction(previous, next InstalledPackage, hadPrevious bool) string {
+	if !hadPrevious {
+		return "Install"
+	}
+	comparison, err := compareVersions(next.Version, previous.Version)
+	if err == nil {
+		switch {
+		case comparison > 0:
+			return "Update"
+		case comparison < 0:
+			return "Downgrade"
+		}
+	}
+	return "Reinstall"
 }
 
 func cloneSettings(settings Settings) Settings {
 	clone := Settings{
-		Channels:     append([]Channel(nil), settings.Channels...),
-		Enabled:      append([]string(nil), settings.Enabled...),
-		ProfileName:  settings.ProfileName,
-		ProfilePath:  settings.ProfilePath,
-		GenerationID: settings.GenerationID,
+		Channels:                  append([]Channel(nil), settings.Channels...),
+		Enabled:                   append([]string(nil), settings.Enabled...),
+		ProfileName:               settings.ProfileName,
+		ProfilePath:               settings.ProfilePath,
+		GenerationID:              settings.GenerationID,
+		EnabledNeedsNormalization: settings.EnabledNeedsNormalization,
 	}
 	return clone
 }

@@ -2,7 +2,7 @@
 
 ## Intent
 
-Add immutable snapshots of successfully applied profile states and offline rollback. This gives NixFlux a useful Nix-like recovery model while reusing the existing verified Store and transaction journal.
+Add immutable snapshots of successfully applied profile states and offline rollback. This gives NixNet a useful Nix-like recovery model while reusing the existing verified Store and transaction journal.
 
 ## Goals
 
@@ -27,7 +27,7 @@ Add immutable snapshots of successfully applied profile states and offline rollb
 
 Each profile keeps immutable JSON manifests under `profiles/<name>/generations/` and a `.generation` pointer to the active manifest. A manifest records schema version, ID, creation time, enabled roots, and the closure's package-to-artifact mapping. Store metadata remains the source for artifact identity and verification.
 
-Profile mutations create a manifest and switch its pointer inside the same transaction as database and command-link changes. Rollback validates the manifest, profile roots, closure, and Store objects before applying it. It performs no repository access. Transaction file changes are restricted to validated NixFlux profile metadata paths, and recovery restores their previous bytes.
+Profile mutations create a manifest and switch its pointer inside the same transaction as database and command-link changes. Rollback validates the manifest, profile roots, closure, and Store objects before applying it. It performs no repository access. Transaction file changes are restricted to validated NixNet profile metadata paths, and recovery restores their previous bytes.
 
 Removing a profile uses one journal to update the default/current markers, command links, profile database references, and profile file. Retained generation manifests are removed with the profile only after the transaction is committed.
 

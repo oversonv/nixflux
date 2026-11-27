@@ -1,11 +1,11 @@
-# NixFlux
+# NixNet
 
 <p align="center">
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.20%2B-00ADD8?logo=go&logoColor=white" alt="Go 1.20 or newer"></a>
   <a href="https://www.kernel.org/"><img src="https://img.shields.io/badge/Platform-Linux-FCC624?logo=linux&logoColor=black" alt="Linux"></a>
   <a href="https://termux.dev/"><img src="https://img.shields.io/badge/Platform-Termux%20%7C%20Android-2C3E50?logo=android&logoColor=white" alt="Termux and Android"></a>
-  <a href="https://github.com/oversonv/nixflux/blob/main/LICENSE"><img src="https://img.shields.io/github/license/oversonv/nixflux" alt="License"></a>
-  <a href="https://github.com/oversonv/nixflux"><img src="https://img.shields.io/github/stars/oversonv/nixflux?style=social" alt="GitHub stars"></a>
+  <a href="https://github.com/oversonv/nixnet/blob/main/LICENSE"><img src="https://img.shields.io/github/license/oversonv/nixnet" alt="License"></a>
+  <a href="https://github.com/oversonv/nixnet"><img src="https://img.shields.io/github/stars/oversonv/nixnet?style=social" alt="GitHub stars"></a>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
   · <a href="docs/ARCHITECTURE.md"><code>Architecture</code></a>
 </p>
 
-NixFlux installs native Debian binary packages (`.deb`) from APT repositories into a private, isolated Store. The active package set is determined by the loaded profile, not by a global enabled list.
+NixNet installs native Debian binary packages (`.deb`) from APT repositories into a private, isolated Store. The active package set is determined by the loaded profile, not by a global enabled list.
 
 - Linux and Android/Termux support.
 - Independent profiles with concrete package versions.
@@ -41,7 +41,7 @@ NixFlux installs native Debian binary packages (`.deb`) from APT repositories in
 Linux ARM64 and Android/Termux ARM64 can install the latest development build without Python or `jq`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/oversonv/nixflux/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/oversonv/nixnet/main/install.sh | sh
 ```
 
 The installer uses `curl` or `wget` to download the matching binary. Termux installs to `$PREFIX/bin`; Linux installs to `$HOME/.local/bin`.
@@ -49,20 +49,20 @@ The installer uses `curl` or `wget` to download the matching binary. Termux inst
 ### Linux
 
 ```sh
-go build -o nixflux ./cmd/nixflux
-./nixflux channel list
-./nixflux channel install https://example.org/apt/stable
-./nixflux env install example:package==1.2.3
-./nixflux profiles list
+go build -o nixnet ./cmd/nixnet
+./nixnet channel list
+./nixnet channel install https://example.org/apt/stable
+./nixnet env install example:package==1.2.3
+./nixnet profiles list
 ```
 
 ### Termux / Android
 
 ```sh
 pkg install golang gpgv xz
-GOOS=android GOARCH=arm64 go build -o nixflux ./cmd/nixflux
-./nixflux channel list
-./nixflux profiles list
+GOOS=android GOARCH=arm64 go build -o nixnet ./cmd/nixnet
+./nixnet channel list
+./nixnet profiles list
 ```
 
 On Android, the binary publishes managed links under `$PREFIX/bin`. On regular Linux, links use `$HOME/nix/bin`, which must be added to `PATH`.
@@ -80,20 +80,20 @@ Requirements:
 go test ./...
 go test -race ./...
 go vet ./...
-go build -o nixflux ./cmd/nixflux
+go build -o nixnet ./cmd/nixnet
 ```
 
 Select a target architecture with standard Go environment variables:
 
 ```sh
-GOOS=linux GOARCH=amd64 go build -o nixflux ./cmd/nixflux
-GOOS=android GOARCH=arm64 go build -o nixflux ./cmd/nixflux
-GOOS=android GOARCH=arm go build -o nixflux ./cmd/nixflux
+GOOS=linux GOARCH=amd64 go build -o nixnet ./cmd/nixnet
+GOOS=android GOARCH=arm64 go build -o nixnet ./cmd/nixnet
+GOOS=android GOARCH=arm go build -o nixnet ./cmd/nixnet
 ```
 
 ## Profiles
 
-A profile is an independent working environment with its own package list. Payload files remain in the shared Store; a profile declares exact roots in `name==version` format. NixFlux resolves those roots into a profile-owned dependency closure pinned to verified Store artifacts. Identical artifacts may be shared physically, but a package from another profile is not implicitly considered installed in this one.
+A profile is an independent working environment with its own package list. Payload files remain in the shared Store; a profile declares exact roots in `name==version` format. NixNet resolves those roots into a profile-owned dependency closure pinned to verified Store artifacts. Identical artifacts may be shared physically, but a package from another profile is not implicitly considered installed in this one.
 
 ```text
 profiles.lock  ──► persistent default profile
@@ -104,8 +104,8 @@ profiles/<name>/.generation ─► active immutable generation
 
 | File / marker | Purpose |
 |---|---|
-| `profiles.lock` | Persistent default profile used by commands without a profile name |
-| `.current` | Profile whose commands are currently published to `PATH` |
+| `profiles.lock` | Persistent default profile used by `profiles update` without a name |
+| `.current` | Profile targeted by `env` commands and published to `PATH` |
 | `<name>.toml` | Independent enabled package list |
 | `<name>/.generation` | Active generation ID for the profile |
 | `<name>/generations/*.json` | Immutable roots and Store closure snapshots |
@@ -120,18 +120,18 @@ enabled = [
 ```
 
 ```sh
-nixflux profiles install work       # create an empty profile without installing packages
-nixflux profiles update work        # update and load work
-nixflux profiles update             # update the persistent default from profiles.lock
-nixflux profiles list               # mark the default and list profiles
-nixflux profiles generations work   # list retained profile generations
-nixflux profiles rollback work <id>  # restore a generation without network access
-nixflux profiles remove work        # atomically remove profile state
+nixnet profiles install work       # create an empty profile without installing packages
+nixnet profiles update work        # apply and load work
+nixnet profiles update             # apply the persistent default from profiles.lock
+nixnet profiles list               # mark the default and list profiles
+nixnet profiles generations work   # list retained profile generations
+nixnet profiles rollback work <id>  # restore a generation without network access
+nixnet profiles remove work        # atomically remove profile state
 ```
 
 `profiles update work` does not modify `profiles.lock`: a named profile update affects only the loaded environment.
 
-Each new profile starts with an empty generation. Successful package, freeze, and profile updates record immutable manifests under `profiles/<name>/generations/`. Rollback verifies every referenced Store artifact before changing the profile. Generations are retained until the profile is removed; NixFlux does not prune them automatically.
+Each new profile starts with an empty generation. Successful package, freeze, and profile updates record immutable manifests under `profiles/<name>/generations/`. Rollback verifies every referenced Store artifact before changing the profile. Generations are retained until the profile is removed; NixNet does not prune them automatically.
 
 ## Configuration
 
@@ -146,7 +146,7 @@ $HOME/nix/
 │   ├── channels.json       # Sole repository configuration source
 │   ├── store.json          # Shared artifact index and per-profile resolved closures
 │   ├── transaction.json    # Unfinished transaction journal
-│   └── nixflux.lock        # Process lock
+│   └── nixnet.lock        # Process lock
 └── profiles/
     ├── profiles.lock       # Persistent default profile
     ├── .current            # Currently loaded profile
@@ -184,7 +184,7 @@ During the initial migration, legacy `settings.toml` is retained as `settings.to
 }
 ```
 
-On Android builds, NixFlux may create the official Termux channel automatically:
+On Android builds, NixNet may create the official Termux channel automatically:
 
 ```json
 {
@@ -195,11 +195,11 @@ On Android builds, NixFlux may create the official Termux channel automatically:
 }
 ```
 
-NixFlux loads `dists/<distribution>/Release`, verifies the signature with `gpgv`, and downloads a Packages index only when it matches the signed size and SHA-256 metadata.
+NixNet loads `dists/<distribution>/Release`, verifies the signature with `gpgv`, and downloads a Packages index only when it matches the signed size and SHA-256 metadata.
 
 ## Installation and Store
 
-NixFlux reads the Debian `ar` container, then `control.tar*` and `data.tar*`, validating package name, version, architecture, paths, symlinks, hardlinks, dependencies, and file checksums. Each downloaded `.deb` is verified against the signed APT Packages index SHA-256.
+NixNet reads the Debian `ar` container, then `control.tar*` and `data.tar*`, validating package name, version, architecture, paths, symlinks, hardlinks, dependencies, and file checksums. Each downloaded `.deb` is verified against the signed APT Packages index SHA-256.
 
 Package payloads are extracted into a content-addressed Store. Files are not copied into a home profile or maintained as copies inside profiles.
 
@@ -210,9 +210,9 @@ Package payloads are extracted into a content-addressed Store. Files are not cop
 | Linux | `$HOME/nix/bin` | The directory must be added to `PATH` |
 | Android / Termux | `$PREFIX/bin` | Managed links are placed in the standard Termux `PATH` |
 
-At startup and after profile switching, NixFlux compares the complete desired link set with existing NixFlux-managed links. Third-party binaries and links outside the NixFlux Store are not removed.
+At startup and after profile switching, NixNet compares the complete desired link set with existing NixNet-managed links. Third-party binaries and links outside the NixNet Store are not removed.
 
-On Termux, `$PREFIX/var/lib/dpkg/status` is used only to identify dependencies already provided by the system. NixFlux does not modify the dpkg database or replace system `pkg` / APT.
+On Termux, `$PREFIX/var/lib/dpkg/status` is used only to identify dependencies already provided by the system. NixNet does not modify the dpkg database or replace system `pkg` / APT.
 
 ## State Flow
 
@@ -238,36 +238,43 @@ Not implemented: maintainer scripts, triggers, conffile semantics, `Provides`, c
 ## Commands
 
 ```sh
-nixflux --help
-nixflux version
+nixnet --help
+nixnet version
 
 # Repositories
-nixflux channel install https://mirror.example/apt/stable
-nixflux channel list
-nixflux channel fetch main
-nixflux channel remove main
+nixnet channel install https://mirror.example/apt/stable
+nixnet channel list
+nixnet channel fetch main
+nixnet channel remove main
 
-# Packages for the persistent default profile
-nixflux env install main:neofetch==latest
-nixflux env install main:neofetch==7.1.0-1
-nixflux env list
-nixflux env freeze neofetch==7.1.0-1
-nixflux env frozen
-nixflux env unfreeze neofetch==7.1.0-1
-nixflux env remove neofetch==7.1.0-1
+# Packages for the currently loaded profile
+nixnet env install main:neofetch==latest
+nixnet env install main:neofetch==7.1.0-1
+nixnet env list
+nixnet env freeze neofetch==7.1.0-1
+nixnet env frozen
+nixnet env unfreeze neofetch==7.1.0-1
+nixnet env remove neofetch==7.1.0-1
+
+# Target a profile without switching the currently loaded environment
+nixnet --profile work env install main:neofetch==latest
+nixnet env update --profile work termux:all==latest
 
 # Profiles
-nixflux profiles list
-nixflux profiles install work
-nixflux profiles update work
-nixflux profiles update
-nixflux profiles generations work
-nixflux profiles rollback work <generation-id>
-nixflux profiles remove work
-nixflux env update
+nixnet profiles list
+nixnet profiles install work
+nixnet profiles update work
+nixnet profiles update
+nixnet profiles generations work
+nixnet profiles rollback work <generation-id>
+nixnet profiles remove work
+nixnet env update termux:all==latest
+nixnet env update termux:eza==latest
 ```
 
-An exact version is required for remove, freeze, and unfreeze. A normal install does not downgrade a package already selected by the same profile. Downgrades selected by exact profile targets are handled by `profiles update` / `env update`. Freeze state belongs to a profile and exact package version. `env remove` removes a root target from the default profile and recomputes that profile's closure; dependencies still needed by another target remain in the closure. It does not remove shared Store artifacts or alter another profile. Dependencies are never installed into Termux's or Linux's system package database; system packages may satisfy dependencies through read-only detection.
+All `env` commands target the currently loaded profile by default. `--profile NAME` selects another profile without switching the loaded environment. `profiles.lock` remains the persistent default used by `profiles update` when no name is supplied. `profiles update [name]` applies the selected profile and switches the currently loaded environment; it does not upgrade package versions. `env update` upgrades newer package versions in its target profile without switching profiles. A source channel is required: `termux:all==latest` selects enabled root packages in the target profile that came from `termux`; `termux:eza==latest` selects the enabled `eza` root and looks for its newer version in `termux`. Only newer versions are applied, and frozen roots are skipped and reported. `all` leaves roots from other channels alone. An exact version is required for remove, freeze, and unfreeze. Freeze state belongs to a profile and exact package version. `env remove` removes a root target from the target profile and recomputes that profile's closure; dependencies still needed by another target remain in the closure. It does not remove shared Store artifacts or alter another profile. Dependencies are never installed into Termux's or Linux's system package database; system packages may satisfy dependencies through read-only detection.
+
+Short `env` actions are aliases: `i` install, `r` remove, `u` update, `l` list, `f` freeze, `uf` unfreeze, and `lf` list frozen packages. For example, `nixnet env u termux:all==latest` is equivalent to `nixnet env update termux:all==latest`.
 
 ## Atomicity and Recovery
 

@@ -31,7 +31,7 @@
 
 **Files:**
 - Modify: `apt_test.go`
-- Modify: `nixflux_test.go`
+- Modify: `nixnet_test.go`
 
 **Interfaces:**
 - Consumes: `makeDebFixture`, `newTestRepositoryWithRequestHook`, `runCLI`, `listProfileGenerations`, `verifyStoredPackage`.

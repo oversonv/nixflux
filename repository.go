@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"archive/zip"
@@ -31,8 +31,13 @@ type RepositoryIndex struct {
 	Debian   bool                                    `json:"-"`
 }
 
+const (
+	maxRepositoryPackageSize = int64(256 << 20)
+	maxPackagePayloadSize    = int64(512 << 20)
+)
+
 func fetchBytes(rawURL string) ([]byte, error) {
-	return fetchBytesLimited(rawURL, 2<<30)
+	return fetchBytesLimited(rawURL, maxRepositoryPackageSize)
 }
 
 func fetchBytesLimited(rawURL string, maxBytes int64) ([]byte, error) {
@@ -60,7 +65,7 @@ func fetchBytesLimited(rawURL string, maxBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, appError("request_error", err.Error())
 	}
-	req.Header.Set("User-Agent", "NixFlux/0.2 (+Debian APT repository client)")
+	req.Header.Set("User-Agent", "NixNet/0.2 (+Debian APT repository client)")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, appError("request_error", err.Error())
@@ -110,11 +115,14 @@ func downloadRepositoryPackage(baseURL, packageName, version string, entry Repos
 	if path == "" || entry.SHA256 == "" {
 		return PackageArtifact{}, appError("invalid_repository", "package entry requires url/file and sha256")
 	}
+	if entry.Size > maxRepositoryPackageSize {
+		return PackageArtifact{}, appError("invalid_package", "package archive exceeds the 256 MiB download limit")
+	}
 	artifactURL, err := resolveRepositoryFile(baseURL, path)
 	if err != nil {
 		return PackageArtifact{}, err
 	}
-	raw, err := fetchBytes(artifactURL)
+	raw, err := fetchBytesLimited(artifactURL, maxRepositoryPackageSize)
 	if err != nil {
 		return PackageArtifact{}, err
 	}
@@ -177,6 +185,9 @@ func packagePayloadSize(raw []byte) (int64, error) {
 	var size int64
 	for _, file := range reader.File {
 		if strings.HasPrefix(file.Name, "payload/") && !file.FileInfo().IsDir() {
+			if file.UncompressedSize64 > uint64(maxPackagePayloadSize)-uint64(size) {
+				return 0, fmt.Errorf("package payload exceeds the 512 MiB expanded size limit")
+			}
 			if file.UncompressedSize64 > uint64(^uint64(0)>>1)-uint64(size) {
 				return 0, fmt.Errorf("package payload size overflows int64")
 			}

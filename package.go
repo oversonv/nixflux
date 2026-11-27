@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"archive/zip"
@@ -158,6 +158,7 @@ func inspectPackageArchive(raw []byte) (PackageManifest, []string, error) {
 	}
 	files := map[string]*zip.File{}
 	var packageTOML, checksums []byte
+	var payloadSize int64
 	for _, f := range reader.File {
 		name := filepath.ToSlash(f.Name)
 		checkName := strings.TrimSuffix(name, "/")
@@ -224,10 +225,14 @@ func inspectPackageArchive(raw []byte) (PackageManifest, []string, error) {
 		if !ok {
 			return manifest, nil, fmt.Errorf("missing checksum for %s", name)
 		}
-		content, e := readZipFileLimit(f, 1<<30)
+		content, e := readZipFileLimit(f, maxPackagePayloadSize)
 		if e != nil {
 			return manifest, nil, e
 		}
+		if int64(len(content)) > maxPackagePayloadSize-payloadSize {
+			return manifest, nil, fmt.Errorf("package payload exceeds the 512 MiB expanded size limit")
+		}
+		payloadSize += int64(len(content))
 		if f.Mode()&os.ModeSymlink != 0 && !safeSymlinkTarget(name, string(content)) {
 			return manifest, nil, fmt.Errorf("unsafe package symlink %q -> %q", name, string(content))
 		}
@@ -272,6 +277,7 @@ func extractPackageArchive(raw []byte, destination string, manifest PackageManif
 		return nil, err
 	}
 	files := []string{"package.toml", "checksums.sha256"}
+	var payloadSize int64
 	for _, f := range reader.File {
 		name := filepath.ToSlash(f.Name)
 		if (name == "package.toml" || name == "checksums.sha256") && !f.FileInfo().IsDir() {
@@ -307,10 +313,14 @@ func extractPackageArchive(raw []byte, destination string, manifest PackageManif
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return nil, err
 		}
-		content, err := readZipFileLimit(f, 1<<30)
+		content, err := readZipFileLimit(f, maxPackagePayloadSize)
 		if err != nil {
 			return nil, err
 		}
+		if int64(len(content)) > maxPackagePayloadSize-payloadSize {
+			return nil, fmt.Errorf("package payload exceeds the 512 MiB expanded size limit")
+		}
+		payloadSize += int64(len(content))
 		mode := f.Mode()
 		if mode&os.ModeSymlink != 0 {
 			linkTarget := string(content)

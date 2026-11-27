@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"bufio"
@@ -22,11 +22,12 @@ type Channel struct {
 }
 
 type Settings struct {
-	Channels     []Channel `json:"channels"`
-	Enabled      []string  `json:"enabled"`
-	ProfileName  string    `json:"-"`
-	ProfilePath  string    `json:"-"`
-	GenerationID string    `json:"-"`
+	Channels                  []Channel `json:"channels"`
+	Enabled                   []string  `json:"enabled"`
+	ProfileName               string    `json:"-"`
+	ProfilePath               string    `json:"-"`
+	GenerationID              string    `json:"-"`
+	EnabledNeedsNormalization bool      `json:"-"`
 }
 
 func defaultSettings() Settings {
@@ -68,6 +69,16 @@ func loadNamedSettings(paths AppPaths, name string) (Settings, error) {
 		return Settings{}, err
 	}
 	return loadProfileSettings(paths, filename)
+}
+
+// loadEnvironmentSettings selects the profile targeted by env commands.
+// An omitted name means the currently loaded profile; an explicit name does
+// not change which profile is loaded.
+func loadEnvironmentSettings(paths AppPaths, name string) (Settings, error) {
+	if strings.TrimSpace(name) == "" {
+		return loadSettings(paths)
+	}
+	return loadNamedSettings(paths, name)
 }
 
 func ensureConfiguration(paths AppPaths) error {
@@ -305,15 +316,78 @@ func loadProfileSettings(paths AppPaths, filename string) (Settings, error) {
 	if err != nil {
 		return Settings{}, appError("invalid_config", filename+": "+err.Error())
 	}
+	warnConflictingProfilePackages(filename, enabled)
 	settings := Settings{Channels: channels, Enabled: enabled, ProfileName: filename, ProfilePath: path}
 	settings.GenerationID, err = readCurrentGeneration(paths, filename)
 	if err != nil {
 		return Settings{}, err
 	}
+	originalEnabled := append([]string(nil), settings.Enabled...)
 	if err := normalizeSettings(&settings); err != nil {
 		return Settings{}, err
 	}
+	settings.EnabledNeedsNormalization = !sameStrings(originalEnabled, settings.Enabled)
 	return settings, nil
+}
+
+func warnConflictingProfilePackages(profile string, enabled []string) {
+	packageNames := map[string]string{}
+	versionsByPackage := map[string][]string{}
+	duplicatesByPackage := map[string][]string{}
+	for _, spec := range enabled {
+		name, version, err := parsePackageVersion(spec)
+		if err != nil {
+			continue
+		}
+		key := normalizePackageName(name)
+		if _, exists := packageNames[key]; !exists {
+			packageNames[key] = name
+		}
+		seenVersion := false
+		for _, previous := range versionsByPackage[key] {
+			if versionsEqual(previous, version) {
+				seenVersion = true
+				duplicateWarned := false
+				for _, duplicate := range duplicatesByPackage[key] {
+					if versionsEqual(duplicate, previous) {
+						duplicateWarned = true
+						break
+					}
+				}
+				if !duplicateWarned {
+					duplicatesByPackage[key] = append(duplicatesByPackage[key], previous)
+				}
+				break
+			}
+		}
+		if !seenVersion {
+			versionsByPackage[key] = append(versionsByPackage[key], version)
+		}
+	}
+
+	keys := make([]string, 0, len(versionsByPackage))
+	for key := range versionsByPackage {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		versions := versionsByPackage[key]
+		if len(versions) > 1 {
+			sort.Slice(versions, func(i, j int) bool {
+				comparison, err := compareVersions(versions[i], versions[j])
+				return err == nil && comparison < 0
+			})
+			older := make([]string, 0, len(versions)-1)
+			for _, version := range versions[:len(versions)-1] {
+				older = append(older, packageNames[key]+"=="+version)
+			}
+			newer := packageNames[key] + "==" + versions[len(versions)-1]
+			reportWarning(fmt.Sprintf("profile %s contains conflicting versions for %s: %s; newer version %s takes priority", profile, packageNames[key], strings.Join(older, ", "), newer))
+		}
+		for _, version := range duplicatesByPackage[key] {
+			reportWarning(fmt.Sprintf("profile %s repeats %s==%s; duplicate entry will be ignored", profile, packageNames[key], version))
+		}
+	}
 }
 
 func parseProfileTOML(input string) ([]string, error) {
@@ -523,7 +597,13 @@ func normalizeSettings(settings *Settings) error {
 			return appError("invalid_config", "invalid existing enabled entry: "+previous)
 		}
 		if !versionsEqual(version, oldVersion) {
-			return appError("invalid_config", fmt.Sprintf("conflicting enabled versions for %s: %s and %s", name, oldName+"=="+oldVersion, name+"=="+version))
+			comparison, compareErr := compareVersions(version, oldVersion)
+			if compareErr != nil {
+				return appError("invalid_config", fmt.Sprintf("cannot compare enabled versions for %s: %s and %s", name, oldName+"=="+oldVersion, name+"=="+version))
+			}
+			if comparison > 0 {
+				selected[key] = oldName + "==" + version
+			}
 		}
 	}
 	keys := make([]string, 0, len(selected))

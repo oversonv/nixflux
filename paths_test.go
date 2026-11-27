@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"os"
@@ -38,7 +38,7 @@ func TestLegacyNixBinLinksMigrateIntoTermuxPathAndRunByName(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\necho 'NixFlux command path works'\n"), 0o755); err != nil {
+	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\necho 'NixNet command path works'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(paths.LegacyBin, 0o755); err != nil {
@@ -75,7 +75,7 @@ func TestLegacyNixBinLinksMigrateIntoTermuxPathAndRunByName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("command found in PATH did not execute: %v: %s", err, output)
 	}
-	if string(output) != "NixFlux command path works\n" {
+	if string(output) != "NixNet command path works\n" {
 		t.Fatalf("unexpected command output: %q", output)
 	}
 }
@@ -119,7 +119,7 @@ func TestLegacyLinkMigrationDoesNotOverwriteExistingTermuxCommand(t *testing.T) 
 	}
 }
 
-func TestStartupRemovesStaleNixFluxBinLinkForDisabledPackage(t *testing.T) {
+func TestStartupRemovesStaleNixNetBinLinkForDisabledPackage(t *testing.T) {
 	home := t.TempDir()
 	prefix := filepath.Join(t.TempDir(), "termux-prefix")
 	paths := pathsForHomeForPlatform(home, "android", prefix)
@@ -128,7 +128,7 @@ func TestStartupRemovesStaleNixFluxBinLinkForDisabledPackage(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\necho 'stale NixFlux command'\n"), 0o755); err != nil {
+	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\necho 'stale NixNet command'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(paths.Bin, 0o755); err != nil {
@@ -149,16 +149,16 @@ func TestStartupRemovesStaleNixFluxBinLinkForDisabledPackage(t *testing.T) {
 		t.Fatalf("startup reconciliation failed: %v", err)
 	}
 	if _, err := os.Lstat(link); !os.IsNotExist(err) {
-		t.Fatalf("disabled NixFlux-owned command link remains in Termux bin: %v", err)
+		t.Fatalf("disabled NixNet-owned command link remains in Termux bin: %v", err)
 	}
 
 	t.Setenv("PATH", paths.Bin)
 	if _, err := exec.LookPath("neofetch"); err == nil {
-		t.Fatal("disabled NixFlux command is still discoverable through PATH")
+		t.Fatal("disabled NixNet command is still discoverable through PATH")
 	}
 }
 
-func TestStartupPreservesNativeTermuxBinaryWhenNixFluxPackageIsDisabled(t *testing.T) {
+func TestStartupPreservesNativeTermuxBinaryWhenNixNetPackageIsDisabled(t *testing.T) {
 	home := t.TempDir()
 	prefix := filepath.Join(t.TempDir(), "termux-prefix")
 	paths := pathsForHomeForPlatform(home, "android", prefix)
@@ -167,7 +167,7 @@ func TestStartupPreservesNativeTermuxBinaryWhenNixFluxPackageIsDisabled(t *testi
 	if err := os.MkdirAll(filepath.Dir(entrypoint), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\necho 'NixFlux copy'\n"), 0o755); err != nil {
+	if err := os.WriteFile(entrypoint, []byte("#!/bin/sh\necho 'NixNet copy'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(paths.Bin, 0o755); err != nil {
@@ -241,8 +241,8 @@ func TestStartupRemovesDisabledLegacyNixBinLink(t *testing.T) {
 }
 
 func TestAndroidEnvInstallPublishesCommandIntoPrefixBin(t *testing.T) {
-	artifact := makeTestPackage(t, "nixflux-path-test", "1.0.0", nil, []byte("#!/bin/sh\necho 'Termux PATH works'\n"))
-	server := newTestRepository(t, map[string][]byte{"nixflux-path-test": artifact})
+	artifact := makeTestPackage(t, "nixnet-path-test", "1.0.0", nil, []byte("#!/bin/sh\necho 'Termux PATH works'\n"))
+	server := newTestRepository(t, map[string][]byte{"nixnet-path-test": artifact})
 	defer server.Close()
 
 	home := t.TempDir()
@@ -252,27 +252,27 @@ func TestAndroidEnvInstallPublishesCommandIntoPrefixBin(t *testing.T) {
 	if err := saveSettings(paths.Settings, settings); err != nil {
 		t.Fatal(err)
 	}
-	if err := envInstall(paths, "main:nixflux-path-test==1.0.0"); err != nil {
+	if err := envInstall(paths, "main:nixnet-path-test==1.0.0"); err != nil {
 		t.Fatalf("Android-path install failed: %v", err)
 	}
 
-	link := filepath.Join(paths.Bin, "nixflux-path-test")
+	link := filepath.Join(paths.Bin, "nixnet-path-test")
 	if _, err := os.Lstat(link); err != nil {
 		t.Fatalf("enabled command was not published in PREFIX/bin: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(paths.LegacyBin, "nixflux-path-test")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(paths.LegacyBin, "nixnet-path-test")); !os.IsNotExist(err) {
 		t.Fatalf("command was unexpectedly published in legacy ~/nix/bin: %v", err)
 	}
 	loaded, err := loadSettings(paths)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.Enabled) != 1 || loaded.Enabled[0] != "nixflux-path-test==1.0.0" {
+	if len(loaded.Enabled) != 1 || loaded.Enabled[0] != "nixnet-path-test==1.0.0" {
 		t.Fatalf("installed target was not persisted in enabled: %#v", loaded.Enabled)
 	}
 
 	t.Setenv("PATH", paths.Bin)
-	resolved, err := exec.LookPath("nixflux-path-test")
+	resolved, err := exec.LookPath("nixnet-path-test")
 	if err != nil {
 		t.Fatalf("enabled command is not discoverable through PATH: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestAndroidEnvInstallPublishesCommandIntoPrefixBin(t *testing.T) {
 	}
 }
 
-func TestLegacyMigrationReplacesStaleNixFluxLinkInTermuxBin(t *testing.T) {
+func TestLegacyMigrationReplacesStaleNixNetLinkInTermuxBin(t *testing.T) {
 	home := t.TempDir()
 	prefix := filepath.Join(t.TempDir(), "termux-prefix")
 	paths := pathsForHomeForPlatform(home, "android", prefix)
@@ -323,9 +323,9 @@ func TestLegacyMigrationReplacesStaleNixFluxLinkInTermuxBin(t *testing.T) {
 	}
 	target, err := os.Readlink(termuxLink)
 	if err != nil || target != newEntrypoint {
-		t.Fatalf("stale NixFlux link in PREFIX/bin was not refreshed: target=%q err=%v", target, err)
+		t.Fatalf("stale NixNet link in PREFIX/bin was not refreshed: target=%q err=%v", target, err)
 	}
 	if _, err := os.Lstat(filepath.Join(paths.LegacyBin, "neofetch")); !os.IsNotExist(err) {
-		t.Fatalf("legacy NixFlux link was not removed: %v", err)
+		t.Fatalf("legacy NixNet link was not removed: %v", err)
 	}
 }

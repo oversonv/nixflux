@@ -70,6 +70,6 @@
 **Interfaces:** Consume transaction metadata-file changes. Profile removal deletes profile metadata and database references in one journal.
 
 - [x] Stage profile, generation manifests, default/current markers, and closure changes in one transaction.
-- [x] Switch active links to a valid remaining profile, or remove only NixFlux-owned links when none remains.
+- [x] Switch active links to a valid remaining profile, or remove only NixNet-owned links when none remains.
 - [x] Ensure recovery restores all removed files and previous links when the transaction is prepared.
 - [x] Run `gofmt`, `go build ./...`, and `git diff --check`.

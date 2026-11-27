@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"bytes"
@@ -42,7 +42,7 @@ func signAPTTestRelease(t *testing.T, release []byte) []byte {
 	}
 	_ = gpgv
 	home := t.TempDir()
-	generate := exec.Command(gpg, "--batch", "--homedir", home, "--passphrase", "", "--quick-generate-key", "NixFlux APT Test <nixflux-test@example.invalid>", "ed25519", "sign", "0")
+	generate := exec.Command(gpg, "--batch", "--homedir", home, "--passphrase", "", "--quick-generate-key", "NixNet APT Test <nixnet-test@example.invalid>", "ed25519", "sign", "0")
 	if output, err := generate.CombinedOutput(); err != nil {
 		t.Fatalf("generate ephemeral APT signing key: %v: %s", err, output)
 	}
@@ -54,7 +54,7 @@ func signAPTTestRelease(t *testing.T, release []byte) []byte {
 	if err := os.WriteFile(keyring, publicKey, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("NIXFLUX_KEYRING", keyring)
+	t.Setenv("NIXNET_KEYRING", keyring)
 	releasePath := filepath.Join(home, "Release")
 	signaturePath := filepath.Join(home, "Release.gpg")
 	if err := os.WriteFile(releasePath, release, 0o600); err != nil {
@@ -76,7 +76,7 @@ func testAPTRepository(t *testing.T, architecture string, packages []string) *ht
 	packagesRaw := []byte(strings.Join(packages, "\n\n") + "\n")
 	compressed := gzipBytes(t, packagesRaw)
 	sum := sha256.Sum256(compressed)
-	release := fmt.Sprintf("Origin: Termux\nLabel: Termux\nSuite: stable\nCodename: stable\nArchitectures: aarch64 arm i686 x86_64 amd64 arm64 i386\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n", hex.EncodeToString(sum[:]), len(compressed), architecture)
+	release := fmt.Sprintf("Origin: Termux\nLabel: Termux\nSuite: stable\nCodename: stable\nDate: %s\nArchitectures: aarch64 arm i686 x86_64 amd64 arm64 i386\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n", time.Now().UTC().Format(time.RFC1123), hex.EncodeToString(sum[:]), len(compressed), architecture)
 	signature := signAPTTestRelease(t, []byte(release))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -148,7 +148,7 @@ func TestAPTRepositoryRejectsCorruptedIndexChecksum(t *testing.T) {
 	if hex.EncodeToString(actual[:]) == bad {
 		t.Fatal("test digest unexpectedly collides")
 	}
-	release := fmt.Sprintf("Architectures: aarch64\nComponents: main\nSHA256:\n %s %d main/binary-aarch64/Packages.gz\n", bad, len(compressed))
+	release := fmt.Sprintf("Date: %s\nArchitectures: aarch64\nComponents: main\nSHA256:\n %s %d main/binary-aarch64/Packages.gz\n", time.Now().UTC().Format(time.RFC1123), bad, len(compressed))
 	signature := signAPTTestRelease(t, []byte(release))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/dists/stable/Release" {
@@ -363,7 +363,7 @@ func TestAPTInstallLatestDebEndToEndWithSystemDependency(t *testing.T) {
 	architecture := runtimeDebianArchitecture()
 	deb := makeDebFixture(t,
 		"Package: neofetch\nVersion: 7.1.0-1\nArchitecture: all\nDepends: bash\nDescription: integration test package\n",
-		[]debFixtureEntry{{Name: "./data/data/com.termux/files/usr/bin/neofetch", Data: []byte("#!/bin/sh\nprintf 'NixFlux APT integration\\n'\n"), Mode: 0o755}},
+		[]debFixtureEntry{{Name: "./data/data/com.termux/files/usr/bin/neofetch", Data: []byte("#!/bin/sh\nprintf 'NixNet APT integration\\n'\n"), Mode: 0o755}},
 		"",
 	)
 	packageSum := sha256.Sum256(deb)
@@ -375,8 +375,8 @@ func TestAPTInstallLatestDebEndToEndWithSystemDependency(t *testing.T) {
 	compressed := gzipBytes(t, packagesRaw)
 	indexSum := sha256.Sum256(compressed)
 	release := fmt.Sprintf(
-		"Origin: Termux integration fixture\nSuite: stable\nCodename: stable\nArchitectures: aarch64 arm i686 x86_64 amd64 arm64 i386\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n",
-		hex.EncodeToString(indexSum[:]), len(compressed), architecture,
+		"Origin: Termux integration fixture\nSuite: stable\nCodename: stable\nDate: %s\nArchitectures: aarch64 arm i686 x86_64 amd64 arm64 i386\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.gz\n",
+		time.Now().UTC().Format(time.RFC1123), hex.EncodeToString(indexSum[:]), len(compressed), architecture,
 	)
 	signature := signAPTTestRelease(t, []byte(release))
 	basePath := "/apt/termux-main"
@@ -439,7 +439,7 @@ func TestAPTInstallLatestDebEndToEndWithSystemDependency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("installed entrypoint did not execute: %v: %s", err, output)
 	}
-	if !strings.Contains(string(output), "NixFlux APT integration") {
+	if !strings.Contains(string(output), "NixNet APT integration") {
 		t.Fatalf("unexpected entrypoint output: %q", output)
 	}
 }
@@ -613,7 +613,7 @@ func TestAPTRepositoryIndexSupportsXZPackages(t *testing.T) {
 	}
 	sum := sha256.Sum256(compressed)
 	architecture := runtimeDebianArchitecture()
-	release := fmt.Sprintf("Architectures: %s\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.xz\n", architecture, hex.EncodeToString(sum[:]), len(compressed), architecture)
+	release := fmt.Sprintf("Date: %s\nArchitectures: %s\nComponents: main\nSHA256:\n %s %d main/binary-%s/Packages.xz\n", time.Now().UTC().Format(time.RFC1123), architecture, hex.EncodeToString(sum[:]), len(compressed), architecture)
 	signature := signAPTTestRelease(t, []byte(release))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

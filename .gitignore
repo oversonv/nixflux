@@ -1,7 +1,8 @@
 /nix/
+/nixnet
 /nixflux
 /build/*
-!/build/nixflux-android-arm64
+!/build/nixnet-android-arm64
 /releases/*
 !/releases/README.md
 *.test

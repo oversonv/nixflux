@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"errors"
@@ -14,15 +14,25 @@ type applicationError struct {
 
 var errorMessages = map[string]string{
 	"missing_args": "Missing required CLI arguments.", "too_many_args": "Too many CLI arguments.", "unknown_option": "Unknown option.", "unknown_command": "Unknown command or subcommand.",
-	"invalid_env_install_format": "Package must be specified as <repo:name==version>.", "invalid_env_remove_format": "Package must be specified as <name==version>.", "invalid_package_name": "Package name does not conform to PEP 508.", "invalid_version": "Version does not conform to Debian or PEP 440 syntax.",
+	"invalid_env_install_format": "Package must be specified as <repo:name==version>.", "invalid_env_update_format": "Updates must be specified as <channel>:<package|all>==latest.", "invalid_env_remove_format": "Package must be specified as <name==version>.", "invalid_package_name": "Package name does not conform to PEP 508.", "invalid_version": "Version does not conform to Debian or PEP 440 syntax.",
 	"channel_not_found": "Channel was not found in channels.json.", "channel_already_exists": "Channel with this name already exists.", "profile_not_found": "Profile was not found.", "profile_exists": "A profile with this name already exists.", "package_not_installed": "Matching package in store was not found.", "package_not_frozen": "Package is not frozen.", "version_not_found": "Requested version was not found in repository.",
 	"timeout": "The site has timed out.", "request_error": "Network error occurred while connecting to repository.", "not_found": "Requested resource was not found in repository.", "http_error": "HTTP error occurred while fetching repository data.", "invalid_json": "Failed to parse JSON response.", "io_error": "Failed to read or write files or directories.",
-	"invalid_config": "NixFlux configuration or profile is invalid.", "invalid_database": "Installed package database is invalid or unsupported.", "invalid_repository": "Repository index is invalid.", "invalid_package": "Package archive is invalid.", "checksum_mismatch": "Package integrity verification failed.", "binary_conflict": "A binary with this name is already owned by another file or package.", "package_frozen": "Package is frozen and cannot change versions.", "downgrade_requires_set_update": "Downgrade is only allowed through 'profiles update'.", "dependency_not_found": "A required dependency was not found.", "dependency_conflict": "Installed packages have conflicting dependency requirements.", "dependency_cycle": "A circular dependency was detected.", "package_required": "Package is required by another installed package.", "store_corrupt": "Installed package data failed an integrity check.",
+	"invalid_config": "NixNet configuration or profile is invalid.", "invalid_database": "Installed package database is invalid or unsupported.", "invalid_repository": "Repository index is invalid.", "invalid_package": "Package archive is invalid.", "checksum_mismatch": "Package integrity verification failed.", "binary_conflict": "A binary with this name is already owned by another file or package.", "package_frozen": "Package is frozen and cannot change versions.", "downgrade_requires_set_update": "Downgrade is only allowed through 'profiles update'.", "dependency_not_found": "A required dependency was not found.", "dependency_conflict": "Installed packages have conflicting dependency requirements.", "dependency_cycle": "A circular dependency was detected.", "package_required": "Package is required by another installed package.", "store_corrupt": "Installed package data failed an integrity check.",
 	"transaction_failed": "Package operation failed and its transaction was rolled back.", "internal_error": "An unexpected internal error occurred.",
 }
-var usageErrorCodes = map[string]bool{"missing_args": true, "too_many_args": true, "unknown_option": true, "unknown_command": true, "invalid_env_install_format": true, "invalid_env_remove_format": true, "invalid_package_name": true, "invalid_version": true}
+var usageErrorCodes = map[string]bool{"missing_args": true, "too_many_args": true, "unknown_option": true, "unknown_command": true, "invalid_env_install_format": true, "invalid_env_update_format": true, "invalid_env_remove_format": true, "invalid_package_name": true, "invalid_version": true}
 
 func appError(code, detail string) error { return &applicationError{code: code, detail: detail} }
+
+func reportWarning(message string) {
+	if os.Getenv("NO_COLOR") == "" {
+		if info, err := os.Stderr.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprintf(os.Stderr, "\033[1;33mwarning\033[0m: %s\n", message)
+			return
+		}
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s\n", message)
+}
 
 // wrapAppError adds an operation boundary while retaining the underlying
 // cause for callers that need to classify or inspect it.
@@ -59,7 +69,15 @@ func reportError(err error) int {
 	if !errors.As(err, &appErr) {
 		appErr = &applicationError{code: "internal_error", detail: err.Error()}
 	}
-	fmt.Fprintln(os.Stderr, appErr.Error())
+	if os.Getenv("NO_COLOR") == "" {
+		if info, err := os.Stderr.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			fmt.Fprintf(os.Stderr, "\033[1;37merror\033[0m: %s\n", appErr.Error())
+		} else {
+			fmt.Fprintf(os.Stderr, "error: %s\n", appErr.Error())
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "error: %s\n", appErr.Error())
+	}
 	if usageErrorCodes[appErr.code] {
 		return 2
 	}

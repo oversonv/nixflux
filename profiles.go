@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"fmt"
@@ -154,6 +154,10 @@ func listProfileGenerations(paths AppPaths, name string) ([]ProfileGeneration, s
 }
 
 func rollbackProfile(paths AppPaths, name, id string) error {
+	return rollbackProfileWithPlan(paths, name, id, nil)
+}
+
+func rollbackProfileWithPlan(paths AppPaths, name, id string, onPlan func([]PackageTransactionItem)) error {
 	if err := ensureConfiguration(paths); err != nil {
 		return err
 	}
@@ -198,6 +202,16 @@ func rollbackProfile(paths AppPaths, name, id string) error {
 	if active.ProfileName == filename {
 		newActive = cloneSettings(newSettings)
 	}
+	if onPlan != nil {
+		current := packagesForProfile(db, filename)
+		changes := packagePlanChanges(paths, current, plan)
+		for key, pkg := range current {
+			if _, retained := plan.Resolved[key]; !retained {
+				changes = append(changes, PackageTransactionItem{Package: pkg, Action: "Remove"})
+			}
+		}
+		onPlan(changes)
+	}
 	return commitPackagePlan(paths, db, plan, settings, newSettings, active, newActive, false)
 }
 
@@ -213,9 +227,9 @@ func renderProfileGenerations(paths AppPaths, name string) error {
 	for _, generation := range generations {
 		marker := ""
 		if generation.ID == current {
-			marker = " (current)"
+			marker = " " + uvAccent("(current)")
 		}
-		fmt.Printf("%s  %s  %d roots%s\n", generation.ID, generation.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"), len(generation.Enabled), marker)
+		fmt.Printf("%s  %s  %s %s%s\n", uvEmphasis(generation.ID), uvDim(generation.CreatedAt.UTC().Format("2006-01-02T15:04:05Z")), uvEmphasis(fmt.Sprintf("%d", len(generation.Enabled))), uvDim("roots"), marker)
 	}
 	return nil
 }
@@ -409,15 +423,15 @@ func renderProfiles(paths AppPaths) error {
 		return err
 	}
 	if len(profiles) == 0 {
-		fmt.Println("No profiles.")
+		fmt.Println(uvDim("No profiles."))
 		return nil
 	}
 	for _, filename := range profiles {
 		name := strings.TrimSuffix(filename, ".toml")
 		if filename == defaultProfile {
-			fmt.Printf("%s (default)\n", name)
+			fmt.Printf("%s %s\n", uvEmphasis(name), uvAccent("(default)"))
 		} else {
-			fmt.Println(name)
+			fmt.Println(uvEmphasis(name))
 		}
 	}
 	return nil

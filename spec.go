@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"regexp"
@@ -42,6 +42,18 @@ func parseRepoPackageSpec(spec string) (string, string, string, error) {
 	}
 	return repo, name, version, nil
 }
+
+func parseEnvUpdateSpec(spec string) (string, string, error) {
+	repo, name, version, err := parseRepoPackageSpec(spec)
+	if err != nil {
+		return "", "", appError("invalid_env_update_format", spec)
+	}
+	if !channelNamePattern.MatchString(repo) || !strings.EqualFold(version, "latest") {
+		return "", "", appError("invalid_env_update_format", spec)
+	}
+	return repo, name, nil
+}
+
 func parsePackageVersion(spec string) (string, string, error) {
 	return parsePackageVersionWithLatest(spec, false)
 }

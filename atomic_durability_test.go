@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"errors"

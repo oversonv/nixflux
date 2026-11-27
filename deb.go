@@ -1,4 +1,4 @@
-package nixflux
+package nixnet
 
 import (
 	"archive/tar"
@@ -22,7 +22,7 @@ import (
 
 const (
 	maxDebControlSize = int64(8 << 20)
-	maxDebPayloadSize = int64(2 << 30)
+	maxDebPayloadSize = maxPackagePayloadSize
 )
 
 type debArMember struct {

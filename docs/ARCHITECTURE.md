@@ -1,8 +1,8 @@
-# NixFlux source architecture
+# NixNet source architecture
 
 ## Current source boundaries
 
-The executable entry point is `cmd/nixflux/main.go`. It delegates to the reusable root Go package (`package nixflux`). The root package currently contains the application implementation and is intentionally kept together to avoid a risky package-boundary rewrite during the enabled-state repair.
+The executable entry point is `cmd/nixnet/main.go`. It delegates to the reusable root Go package (`package nixnet`). The root package currently contains the application implementation and is intentionally kept together to avoid a risky package-boundary rewrite during the enabled-state repair.
 
 The root source files are grouped by responsibility, even though they are not yet separate Go import packages:
 
@@ -27,16 +27,18 @@ Tests remain alongside the root package so they can exercise internal transactio
 - each profile's `.generation` pointer selects an immutable manifest under `profiles/<name>/generations/`; the manifest retains prior roots and artifact IDs for offline rollback.
 - the artifact index is shared for deduplication, but resolution only reuses packages in the selected profile closure or read-only system packages.
 - dependency commands are not published unless the dependency is also an explicit root target in the loaded profile.
-- `profiles update [name]` reconciles only the selected profile's enabled targets with repositories and the Store. Without a name it uses `profiles.lock`; with a name it also loads that profile without changing the persistent default.
+- `profiles update [name]` applies the selected profile and loads it without changing the persistent default when a name is supplied. It reconciles exact enabled targets with the Store; it does not upgrade their versions.
+- every `env` command targets `.current` by default; `--profile NAME` targets another profile without loading it or changing `.current`.
+- `env update <channel>:<package|all>==latest` upgrades only newer versions of selected roots in its target profile. `all` selects roots whose installed source matches the required channel. It skips frozen roots and never switches profiles.
 
-Package and freeze mutations update the target profile, artifact index, profile closure, immutable generation manifest, generation pointer, and command links through one transaction journal. `profiles generations` lists retained manifests; `profiles rollback` verifies Store artifacts and restores one generation without network access. Removing a profile atomically removes its spec, generation manifests, database references, default/current markers, and owned command links. Store objects remain available to other profiles. Garbage collection is not implemented. Startup link reconciliation removes stale NixFlux-owned command links created by older releases, without deleting unrelated commands. On Android, current links live in `$PREFIX/bin`; `$HOME/nix/bin` is retained only as a legacy migration source. The CLI refuses to run on Android when `PREFIX` is missing or not absolute, preventing silent publication into a directory outside Termux's standard `PATH`.
+Package and freeze mutations update the target profile, artifact index, profile closure, immutable generation manifest, generation pointer, and command links through one transaction journal. `profiles generations` lists retained manifests; `profiles rollback` verifies Store artifacts and restores one generation without network access. Removing a profile atomically removes its spec, generation manifests, database references, default/current markers, and owned command links. Store objects remain available to other profiles. Garbage collection is not implemented. Startup link reconciliation removes stale NixNet-owned command links created by older releases, without deleting unrelated commands. On Android, current links live in `$PREFIX/bin`; `$HOME/nix/bin` is retained only as a legacy migration source. The CLI refuses to run on Android when `PREFIX` is missing or not absolute, preventing silent publication into a directory outside Termux's standard `PATH`.
 
 ## Dependency direction
 
 The intended dependency direction is:
 
 ```text
-cmd/nixflux -> nixflux CLI -> application operations -> repository / archive / store / transaction
+cmd/nixnet -> nixnet CLI -> application operations -> repository / archive / store / transaction
 ```
 
 Low-level components should not import the CLI or application orchestration. The current single-library-package layout does not enforce all these boundaries at the Go compiler level; this is recorded as future modularization work, not claimed as completed.
@@ -46,7 +48,7 @@ Low-level components should not import the CLI or application orchestration. The
 A future extraction should be incremental and preserve existing public behavior:
 
 ```text
-cmd/nixflux/
+cmd/nixnet/
 internal/
   app/              # use cases: install, remove, synchronize, freeze
   domain/           # package, dependency, version and target models

@@ -34,7 +34,7 @@
 - Create: `transaction_crash_test.go`
 - Create: `transaction_security_test.go`
 - Create: `generation_integrity_test.go`
-- Modify: `nixflux_test.go`, `paths_test.go`
+- Modify: `nixnet_test.go`, `paths_test.go`
 
 **Interfaces:**
 - Produces: internal `applyTransactionObserved(paths AppPaths, journal transactionJournal, db Database, afterMutation func(string) error) error`; `applyTransaction` remains the production entry point and passes no observer.
